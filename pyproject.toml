@@ -15,6 +15,7 @@ dependencies = [
     "gersemi>=0.19",
     "ninja>=1.11",
     "ruff>=0.4",
+    "tomlkit>=0.13,<1",
 ]
 
 [project.scripts]

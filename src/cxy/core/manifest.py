@@ -118,6 +118,10 @@ def check_name(name: str) -> None:
         )
 
 
+def check_dependency_name(name: str) -> None:
+    _conan_name(name)
+
+
 def _dependencies(data: Mapping[str, Any], section: str) -> tuple[Dependency, ...]:
     return tuple(
         _dependency(_conan_name(name), value, f"{section}.{name}")

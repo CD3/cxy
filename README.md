@@ -10,8 +10,7 @@ cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
-Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `lint`, `lock`, `export`, `clean`.
-Planned: `add`, `remove`.
+Commands: `new`, `init`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
 
 ## cxy.toml
 
@@ -51,6 +50,20 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - A source matching `test-patterns` beside the code it tests becomes its own test program.
 - Everything in `tests/` goes into one test program.
 - Layout directories may coincide, for example `lib = "src"` and `include = "src"`.
+
+## Dependencies
+
+```sh
+cxy add fmt                          # the newest release
+cxy add fmt@11.0.2 spdlog            # fmt/11.0.2 works too
+cxy add --dev trompeloeil            # only for tests
+cxy add boost -o shared=false        # with a Conan option
+cxy add fmt@10.2.0 --force-version   # win a version conflict
+cxy remove fmt
+```
+
+These edit `cxy.toml`, keeping its comments, and update `cxy.lock`. If the dependencies cannot be
+resolved, nothing changes. `[overrides]` is edited by hand.
 
 ## Locking
 
@@ -129,8 +142,8 @@ extensions. Be careful when checking a project that you do not trust.
 
 ## Sharing a project with people who do not use cxy
 
-`cxy export` writes `conanfile.py`, `CMakeLists.txt` and `conan.lock` to the project root. It will not replace
-files with different content unless given `--force`. To build the result:
+`cxy export` writes `conanfile.py`, `CMakeLists.txt` and `conan.lock` to the project root. It replaces
+files that it wrote, but needs `--force` for any that have been edited or were there before. To build the result:
 
 ```sh
 conan install . --build=missing -s compiler.cppstd=20

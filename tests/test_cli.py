@@ -101,6 +101,11 @@ def test_export_builds_without_cxy(tmp_path):
     assert (project / "CMakeLists.txt").read_text() == "# edited\n"
     assert cxy("export", "--force", cwd=project).returncode == 0
 
+    # A file that cxy wrote and nobody edited needs no --force, even when it changes.
+    (project / "lib" / "extra.cpp").write_text("int extra() { return 1; }\n")
+    assert cxy("export", cwd=project).returncode == 0
+    assert "extra.cpp" in (project / "CMakeLists.txt").read_text()
+
 
 @pytest.mark.e2e
 def test_lock_follows_the_manifest(tmp_path):
@@ -166,3 +171,33 @@ def test_lock_follows_the_manifest(tmp_path):
     ok("build", "--release")
     assert (project / "cxy.lock").read_text() == before
     assert "Resolving" not in ok("build", "--release")
+
+
+@pytest.mark.e2e
+def test_add_and_remove(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    toml, lock = project / "cxy.toml", project / "cxy.lock"
+    toml.write_text("# keep me\n" + toml.read_text())
+
+    def ok(*arguments):
+        result = cxy(*arguments, cwd=project)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    ok("add", "spdlog@1.14.1")
+    assert "spdlog/1.14.1" in lock.read_text()
+
+    # spdlog needs fmt 10.2.1, so this cannot be resolved and nothing may change.
+    before = toml.read_text(), lock.read_text()
+    assert cxy("add", "fmt@10.2.0", cwd=project).returncode == 1
+    assert cxy("add", "zlib", "no-such-package-xyz", cwd=project).returncode == 1
+    assert (toml.read_text(), lock.read_text()) == before
+
+    ok("add", "fmt/10.2.0", "--force-version")
+    assert 'fmt = {version = "10.2.0", force = true}' in toml.read_text()
+    ok("lock", "--check")
+    ok("remove", "fmt", "spdlog")
+    assert "spdlog" not in toml.read_text() + lock.read_text()
+    ok("add", "zlib")
+    assert toml.read_text().startswith("# keep me\n")
+    ok("build", "--locked")

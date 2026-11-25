@@ -15,7 +15,7 @@ from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.lock import Lock
 from cxy.core.project import Project, Sources
-from cxy.core.stamp import Stamp, write_if_changed
+from cxy.core.stamp import Stamp, digest, write_if_changed
 
 NO_TESTS_RUN = 2  # Catch2's exit code, though some versions also use it for failures.
 CACHE_MARKER = "CACHEDIR.TAG"
@@ -134,6 +134,8 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
     }
     if (lock := Lock.load(project.root / locks.FILENAME)) is not None:
         files[project.root / "conan.lock"] = lock.conan_text()
+    record = project.build_dir / "exported.json"
+    exported = _read_exported(record)
     conflicts = []
     for path, text in files.items():
         formatted = _format_export(project, path, text)
@@ -141,18 +143,29 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
         if path.exists():
             current = path.read_text(encoding="utf-8", errors="replace")
             # Unformatted files are ours too, from before the formatter was available.
-            if current not in (text, formatted):
+            ours = digest(path) == exported.get(path.name)
+            if not ours and current not in (text, formatted):
                 conflicts.append(path.name)
     if conflicts and not force:
         raise CxyError(
-            f"{' and '.join(conflicts)} already exist with different content; "
-            "use --force to replace"
+            f"{' and '.join(conflicts)} would be replaced, but cxy did not write what is there "
+            "now; use --force to replace"
         )
     for path, text in files.items():
         if write_if_changed(path, text):
             tools.status("Wrote", path.name)
         else:
             tools.status("Unchanged", path.name)
+    # Files that have not been edited since may be replaced without asking.
+    write_if_changed(record, json.dumps({path.name: digest(path) for path in files}, indent=4))
+
+
+def _read_exported(record: Path) -> dict[str, str]:
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def lock(
