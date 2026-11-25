@@ -445,6 +445,56 @@ def test_separate_programs(tmp_path):
 
 
 @pytest.mark.e2e
+@pytest.mark.parametrize("framework", ["catch2", "gtest"])
+def test_working_directory(tmp_path, framework):
+    cxy("new", "demo", "--lib", cwd=tmp_path)
+    project = tmp_path / "demo"
+    body = '{ std::ofstream("out.txt") << 1; }\n'
+    if framework == "gtest":
+        manifest, test = GTEST_PROJECT, "#include <gtest/gtest.h>\nTEST(Writes, file) " + body
+    else:
+        manifest = GTEST_PROJECT.replace('gtest = "1.17.0"', 'catch2 = "3.7.1"')
+        test = '#include <catch2/catch_test_macros.hpp>\nTEST_CASE("w") ' + body
+    (project / "tests" / "greeting_test.cpp").write_text("#include <fstream>\n" + test)
+    (project / "tests" / "data").mkdir()
+    toml = project / "cxy.toml"
+    toml.write_text(manifest)
+
+    def written():
+        paths = list(project.rglob("out.txt"))
+        for path in paths:
+            path.unlink()
+        return [path.parent.relative_to(project).as_posix() for path in paths]
+
+    def ctest_here():
+        # Discovery happens when CTest runs.
+        command = ["ctest", "--test-dir", "build/cxy/debug"]
+        done = subprocess.run(command, cwd=project, capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+
+    for setting, expected in (
+        ("", "build/cxy/debug"),
+        ('[test]\nworking-directory = "tests/data"\n', "tests/data"),
+        ('[test]\nworking-directory = "."\n', "."),
+    ):
+        toml.write_text(manifest + setting)
+        for start in project, project / "lib":
+            result = cxy("test", cwd=start)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert written() == [expected]
+        ctest_here()
+        assert written() == [expected]
+
+    assert cxy("export", cwd=project).returncode == 0
+    ctest(project)
+    assert written() == ["."]
+
+    toml.write_text(manifest + '[test]\nworking-directory = "missing"\n')
+    result = cxy("test", cwd=project)
+    assert result.returncode == 1 and "not a directory" in result.stderr
+
+
+@pytest.mark.e2e
 def test_gtest_output_is_kept(tmp_path):
     cxy("new", "demo", cwd=tmp_path)
     project = tmp_path / "demo"

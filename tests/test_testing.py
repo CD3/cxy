@@ -189,3 +189,21 @@ def test_is_test(tmp_path, name, text, expected):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / name).write_text(f"#include <x>\n{text}\n")
     assert testing.is_test(Project.find(tmp_path), f"tests/{name}") is expected
+
+
+@pytest.mark.parametrize("root", [None, "../.."])
+def test_working_directory(root):
+    def text(extra):
+        project = manifest('gtest = "1"\n', extra)
+        programs = plan_programs(project, TESTS, lambda _: set())
+        return cmake.cmakelists(
+            project, Sources(lib=("lib/a.cpp",)), {}, programs=programs, root=root
+        )
+
+    assert "WORKING_DIRECTORY" not in text("")
+    base = "CMAKE_CURRENT_SOURCE_DIR" if root is None else "ROOT_DIR"
+    expected = f'WORKING_DIRECTORY "${{{base}}}/tests/data"'
+    assert text('[test]\nworking-directory = "tests/data"\n').count(expected) == 2
+    for bad in "../x", "/x":
+        with pytest.raises(CxyError, match="inside the project"):
+            manifest(extra=f'[test]\nworking-directory = "{bad}"\n')

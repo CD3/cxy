@@ -60,6 +60,9 @@ def test(
     programs = testing.plan(project, sources)
     if not programs:
         raise CxyError("no tests found")
+    setting = project.manifest.test_working_directory
+    if setting is not None and not (project.root / setting).is_dir():
+        raise CxyError(f"test.working-directory {setting} is not a directory")
     everything = programs
     programs = _select(project, programs, names)
     used = {program.framework.package for program in programs}
@@ -89,6 +92,8 @@ def test(
     targets = [(p, p.isolated_target if isolated else p.target) for p in programs]
     directory = _build(project, options, [target for _, target in targets], needed)
 
+    # The same as under CTest, wherever cxy was called from.
+    cwd = directory if setting is None else project.root / setting
     failed: list[tuple[str, int]] = []
     matched = False
     for program, target in targets:
@@ -97,8 +102,8 @@ def test(
         tools.status("Running", target)
         chosen = framework.filter_arguments(name_filter) if name_filter else []
         chosen += arguments
-        code = tools.execute(executable, chosen)
-        if framework.ran_nothing(executable, chosen, code):
+        code = tools.execute(executable, chosen, cwd)
+        if framework.ran_nothing(executable, chosen, code, cwd):
             # A filter need not match something in every program.
             continue
         matched = True

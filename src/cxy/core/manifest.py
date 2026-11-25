@@ -57,6 +57,9 @@ class Manifest:
     test_framework: str | None = None
     """The framework of tests that do not show which they use."""
 
+    test_working_directory: str | None = None
+    """Where tests run, relative to the project root; by default, the build directory."""
+
     test_separate: bool = False
     """Whether each test in the tests directory is its own program."""
 
@@ -114,6 +117,7 @@ def parse(text: str) -> Manifest:
         overrides=overrides,
         layout=_layout(_table(data, "layout")),
         test_framework=_test_framework(_table(data, "test")),
+        test_working_directory=_test_working_directory(_table(data, "test")),
         test_separate=_boolean(_table(data, "test").get("separate", False), "test.separate"),
         tools=_tools(_table(data, "tools")),
     )
@@ -167,11 +171,7 @@ def _layout(table: Mapping[str, Any]) -> Layout:
     _known(table, directories | {"test-patterns"}, "[layout]")
     values: dict[str, str] = {}
     for key in directories & table.keys():
-        value = _string(table[key], f"layout.{key}")
-        path = PurePosixPath(value)
-        if path.is_absolute() or ".." in path.parts or "\\" in value or ":" in value:
-            raise CxyError(f"layout.{key} must be a relative path inside the project")
-        values[key] = path.as_posix()
+        values[key] = _inside(table[key], f"layout.{key}")
     if values.get("build") == ".":
         raise CxyError("layout.build cannot be the project directory")
     patterns = Layout.test_patterns
@@ -189,8 +189,23 @@ def _layout(table: Mapping[str, Any]) -> Layout:
     return layout
 
 
+def _inside(value: Any, where: str) -> str:
+    """Return a path inside the project, relative to its root."""
+    text = _string(value, where)
+    path = PurePosixPath(text)
+    if path.is_absolute() or ".." in path.parts or "\\" in text or ":" in text:
+        raise CxyError(f"{where} must be a relative path inside the project")
+    return path.as_posix()
+
+
+def _test_working_directory(table: Mapping[str, Any]) -> str | None:
+    if "working-directory" not in table:
+        return None
+    return _inside(table["working-directory"], "test.working-directory")
+
+
 def _test_framework(table: Mapping[str, Any]) -> str | None:
-    _known(table, {"framework", "separate"}, "[test]")
+    _known(table, {"framework", "separate", "working-directory"}, "[test]")
     framework = table.get("framework")
     if framework is not None and framework not in TEST_FRAMEWORKS:
         raise CxyError(f"test.framework must be one of {', '.join(TEST_FRAMEWORKS)}")

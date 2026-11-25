@@ -41,3 +41,5 @@
   matches nothing.
 - **Test frameworks are linked before other libraries.** Some of Boost's have a main() too, and the
   linker uses the first that it finds.
+- **Tests run in the build directory, as under CTest**, so they behave the same wherever cxy is called
+  from and do not write to the source tree. `cxy run` uses the caller's directory.

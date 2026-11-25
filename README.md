@@ -60,6 +60,7 @@ catch2 = "3.7.1"       # or gtest, or both
 [test]                 # optional
 framework = "catch2"   # for tests that do not show which framework they use
 separate = false       # whether each test file in tests/ is its own program
+working-directory = "." # where tests run; by default, the build directory
 
 [overrides]            # versions of transitive dependencies
 fmt = "10.2.0"
@@ -164,6 +165,21 @@ one file at a time. Linking takes longer, as there are more programs.
 
 A test file is one that matches `test-patterns` or uses a macro such as `TEST` or `TEST_CASE`. The
 others in `tests/` are helpers, such as a custom `main()`, and are compiled into every program.
+
+### Working directory
+
+Tests run in the build directory, such as `build/cxy/debug`, wherever you call `cxy test` from, so
+that files they write stay out of the source tree. If tests read files by relative path, choose a
+directory relative to the project root:
+
+```toml
+[test]
+working-directory = "tests/data"
+```
+
+Relative paths in arguments to the tests, such as for a report, are relative to that directory too.
+`ctest` uses the same directory, including in exported projects: `ctest --test-dir build/cxy/debug`
+works after building.
 
 ### Choosing tests
 

@@ -38,7 +38,7 @@ class Framework:
         """Return the arguments to run tests with this text in their names."""
         raise NotImplementedError
 
-    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int) -> bool:
+    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int, cwd: Path) -> bool:
         """Whether a program that exited with this code had no matching tests."""
         raise NotImplementedError
 
@@ -47,12 +47,13 @@ class _Catch2(Framework):
     def filter_arguments(self, text: str) -> list[str]:
         return ["*" + re.sub(r'([\\,\["~])', r"\\\1", text) + "*"]
 
-    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int) -> bool:
+    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int, cwd: Path) -> bool:
         # Some versions also exit with this code when that many assertions fail.
         if code != 2:
             return False
         result = subprocess.run(
             [str(executable), *arguments, "--allow-running-no-tests"],
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
         )
@@ -64,13 +65,14 @@ class _GoogleTest(Framework):
         # These separate patterns and cannot be escaped, so match any character instead.
         return ["--gtest_filter=*" + re.sub(r"[:-]", "?", text) + "*"]
 
-    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int) -> bool:
+    def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int, cwd: Path) -> bool:
         # Most versions succeed when no tests match, so ask which do. Listing tests writes the
         # list to any output file, which would replace the results.
         arguments = [a for a in arguments if not re.match("--?gtest_output", a)]
         environment = {k: v for k, v in os.environ.items() if k != "GTEST_OUTPUT"}
         result = subprocess.run(
             [str(executable), *arguments, "--gtest_list_tests"],
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             env=environment,

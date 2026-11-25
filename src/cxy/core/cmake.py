@@ -118,6 +118,14 @@ def cmakelists(
             framework = program.framework
             return [*framework.links(dev[framework.package], graph), *_targets(others, graph)]
 
+        # CTest runs tests in the build directory by default.
+        test_directory = []
+        if manifest.test_working_directory is not None:
+            base_dir = "CMAKE_CURRENT_SOURCE_DIR" if root is None else "ROOT_DIR"
+            test_directory = [
+                f'WORKING_DIRECTORY "${{{base_dir}}}/{quote(manifest.test_working_directory)[1:]}'
+            ]
+
         modules = dict.fromkeys(program.framework.cmake_module for program in programs)
         body = _find_packages(dev.values(), graph)
         body += [f"include({module})" for module in modules]
@@ -131,7 +139,12 @@ def cmakelists(
             body += _call(
                 program.framework.discover_command,
                 [],
-                [target, "DISCOVERY_MODE PRE_TEST", f'TEST_PREFIX "{target}:"'],
+                [
+                    target,
+                    "DISCOVERY_MODE PRE_TEST",
+                    f'TEST_PREFIX "{target}:"',
+                    *test_directory,
+                ],
             )
         for program in programs:
             needed = (isolated or {}).get(program.sources[0]) if program.is_unit else None
