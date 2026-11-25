@@ -167,10 +167,10 @@ version pinned in `[tools]` is used, then `PATH`, then the copies installed with
 ## Development
 
 ```sh
-uv run poe check         # lint, typecheck and test
-uv run poe lint          # ruff
-uv run poe typecheck     # ty
-uv run poe test          # unit tests
-uv run poe test -m e2e   # real builds; set CONAN_HOME to isolate the Conan cache
-uv run ruff format       # format the code
+uv run poe check          # lint, format-check, typecheck and test
+uv run poe lint           # ruff
+uv run poe format-check   # ruff; fix with "uv run ruff format"
+uv run poe typecheck      # ty
+uv run poe test           # unit tests
+uv run poe test -m e2e    # real builds; set CONAN_HOME to isolate the Conan cache
 ```

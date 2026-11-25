@@ -51,11 +51,15 @@ cmd = "pytest"
 help = "Run the linter"
 cmd = "ruff check"
 
+[tool.poe.tasks.format-check]
+help = "Check the formatting"
+cmd = "ruff format --check"
+
 [tool.poe.tasks.typecheck]
 help = "Run the type checker"
 cmd = "ty check"
 
 [tool.poe.tasks.check]
-help = "Run the linter, type checker and unit tests"
-sequence = ["lint", "typecheck", "test"]
+help = "Run the linter, formatting check, type checker and unit tests"
+sequence = ["lint", "format-check", "typecheck", "test"]
 ignore_fail = "return_non_zero"  # Run them all, even if one fails.
