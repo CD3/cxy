@@ -10,9 +10,11 @@ from typing import Any
 from cxy.core.errors import CxyError
 
 FILENAME = "cxy.toml"
+TOOLS = ("clang-format", "gersemi", "ruff")
 STANDARDS = (11, 14, 17, 20, 23, 26)
 RESERVED_NAMES = {"all", "clean", "help", "install", "package", "test"}
 _PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
+_TOOL_VERSION = re.compile(r"[0-9][0-9A-Za-z.]*")
 _CONAN_NAME = re.compile(r"[a-z0-9_][a-z0-9_+.-]+")
 
 OptionValue = str | bool | int
@@ -51,6 +53,8 @@ class Manifest:
     dev_dependencies: tuple[Dependency, ...] = ()
     overrides: Mapping[str, str] = field(default_factory=dict)
     layout: Layout = field(default_factory=Layout)
+    tools: Mapping[str, str] = field(default_factory=dict)
+    """Pinned versions of formatters."""
 
 
 def load(path: Path) -> Manifest:
@@ -67,7 +71,9 @@ def load(path: Path) -> Manifest:
 def parse(text: str) -> Manifest:
     data = tomllib.loads(text)
     _known(
-        data, {"package", "dependencies", "dev-dependencies", "overrides", "layout"}, "top level"
+        data,
+        {"package", "dependencies", "dev-dependencies", "overrides", "layout", "tools"},
+        "top level",
     )
     package = _table(data, "package")
     _known(package, {"name", "version", "std"}, "[package]")
@@ -100,6 +106,7 @@ def parse(text: str) -> Manifest:
         dev_dependencies=dev_dependencies,
         overrides=overrides,
         layout=_layout(_table(data, "layout")),
+        tools=_tools(_table(data, "tools")),
     )
 
 
@@ -169,6 +176,14 @@ def _layout(table: Mapping[str, Any]) -> Layout:
         if parent != "." and build.is_relative_to(parent):
             raise CxyError(f"layout.build cannot be inside layout.{key}")
     return layout
+
+
+def _tools(table: Mapping[str, Any]) -> dict[str, str]:
+    _known(table, set(TOOLS), "[tools]")
+    for name, value in table.items():
+        if not _TOOL_VERSION.fullmatch(_string(value, f"tools.{name}")):
+            raise CxyError(f"tools.{name} must be an exact version, such as 18.1.8")
+    return dict(table)
 
 
 def _conan_name(name: str) -> str:

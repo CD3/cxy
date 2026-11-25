@@ -16,3 +16,8 @@
   test needs. It relies on naming conventions, so it is not the default and is not exported.
 - **Debug is the default build type.**
 - **`clean` only deletes a directory that cxy created.** cxy keeps its files in `build/cxy`.
+- **Formatters run directly, not through CMake targets.** That needs no configure step, works in
+  projects that do not use cxy, and keeps exports clean.
+- **cxy writes formatted files itself.** Tools only produce text, so check, diff and write modes
+  are the same for all of them. Tools are given paths where possible: clang-format 18 does not
+  apply `.clang-format-ignore` to stdin, and older gersemi cannot find its configuration for it.

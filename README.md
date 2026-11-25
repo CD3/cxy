@@ -10,8 +10,8 @@ cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
-Commands: `new`, `init`, `build`, `run`, `test`, `export`, `clean`.
-Planned: `add`, `remove`, `lock`.
+Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `export`, `clean`.
+Planned: `add`, `remove`, `lock`, `lint`.
 
 ## cxy.toml
 
@@ -34,6 +34,9 @@ catch2 = "3.7.1"
 
 [overrides]            # versions of transitive dependencies
 fmt = "10.2.0"
+
+[tools]                # optional exact versions of formatters, run with uv
+clang-format = "18.1.8"
 
 [layout]               # defaults
 lib = "lib"
@@ -61,6 +64,25 @@ Test programs normally link the whole library. `--isolated` instead compiles onl
 a test needs, so you can port code one file at a time after a breaking change. It finds them by
 following includes, and assumes that `http.hpp` is implemented in `http.cpp`.
 
+## Formatting
+
+```sh
+cxy fmt                       # the whole project
+cxy fmt lib CMakeLists.txt    # some of it
+cxy fmt --check               # change nothing; fail if anything needs formatting
+cxy fmt --diff                # ...and show what would change
+```
+
+| Files | Tool | Configuration |
+|---|---|---|
+| C++ | clang-format | `.clang-format` |
+| `CMakeLists.txt`, `*.cmake` | gersemi | `.gersemirc` |
+| `conanfile.py` | ruff | `ruff.toml` or `pyproject.toml` |
+
+In a project that does not use cxy, this covers every file in the git repository that is not
+ignored. Without git, it covers the current directory. A tool with no configuration uses its
+defaults, and cxy says so.
+
 ## Sharing a project with people who do not use cxy
 
 `cxy export` writes `conanfile.py` and `CMakeLists.txt` to the project root. It will not replace
@@ -77,8 +99,8 @@ Source files are listed explicitly, so export again after adding or removing any
 
 ## Tools
 
-Set `CXY_CONAN`, `CXY_CMAKE` or `CXY_NINJA` to choose a specific tool. Otherwise `PATH` is
-searched first, then the copies installed with cxy.
+Set a variable such as `CXY_CONAN` or `CXY_CLANG_FORMAT` to choose a specific tool. Otherwise a
+version pinned in `[tools]` is used, then `PATH`, then the copies installed with cxy.
 
 ## Development
 

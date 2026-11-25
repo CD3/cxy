@@ -21,6 +21,13 @@ std = 20
 catch2 = "3.7.1"
 """
 
+_CLANG_FORMAT = """\
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: Empty
+"""
+
 _HEADER = """\
 #pragma once
 
@@ -91,6 +98,7 @@ def _create(path: Path, name: str, lib_only: bool) -> None:
     files = {manifests.FILENAME: _MANIFEST, ".gitignore": "/build/\n/CMakeUserPresets.json\n"}
     # Leave existing code alone: only add the sample if no source directory exists.
     if not any((path / d).exists() for d in ("lib", "src", "include", "tests")):
+        files[".clang-format"] = _CLANG_FORMAT
         files[f"include/{name}/greeting.hpp"] = _HEADER
         files["lib/greeting.cpp"] = _SOURCE
         files["tests/greeting_test.cpp"] = _TEST

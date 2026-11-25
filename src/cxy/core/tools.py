@@ -20,11 +20,30 @@ def search_path() -> str:
 
 def find(name: str) -> str:
     """Return the path to a tool, honouring overrides such as CXY_CONAN."""
-    requested = os.environ.get(f"CXY_{name.upper()}", name)
+    requested = os.environ.get(_variable(name), name)
     path = shutil.which(requested, path=search_path())
     if path is None:
         raise CxyError(f"could not find {requested}")
     return path
+
+
+def _variable(name: str) -> str:
+    return f"CXY_{name.upper().replace('-', '_')}"
+
+
+def command(name: str, pin: str | None) -> list[str]:
+    """Return the command for a tool, at a pinned version if given.
+
+    Pinned tools run through uv, which caches them. They must be Python packages with the
+    same name as the tool.
+    """
+    if pin is None or _variable(name) in os.environ:
+        return [find(name)]
+    try:
+        uv = find("uv")
+    except CxyError:
+        raise CxyError(f"{name} is pinned to {pin}, which needs uv to be installed") from None
+    return [uv, "tool", "run", "--quiet", "--from", f"{name}=={pin}", name]
 
 
 def identity(name: str) -> list[str | int]:

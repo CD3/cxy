@@ -1,6 +1,7 @@
 """Locate a project and classify its source files."""
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
@@ -98,23 +99,31 @@ class Project:
             has_headers=has_headers,
         )
 
-    def _files(self) -> list[PurePosixPath]:
-        found: list[PurePosixPath] = []
+    def files(self) -> list[Path]:
+        """Return every file in the layout directories and directly in the root."""
         layout = self.manifest.layout
-        visited: set[Path] = set()
-        for top in sorted({layout.lib, layout.src, layout.include, layout.tests}):
-            for current, directories, names in os.walk(self.root / top):
-                here = Path(current)
-                directories[:] = sorted(
-                    d
-                    for d in directories
-                    if not d.startswith(".") and here / d != self.build_dir.parent
-                )
-                if here in visited:
-                    continue
-                visited.add(here)
-                for name in names:
-                    if Path(name).suffix in SOURCE_SUFFIXES | HEADER_SUFFIXES:
-                        relative = (here / name).relative_to(self.root)
-                        found.append(PurePosixPath(relative.as_posix()))
+        found = {path for path in self.root.iterdir() if path.is_file()}
+        for top in {layout.lib, layout.src, layout.include, layout.tests}:
+            found.update(self._walk(top))
         return sorted(found)
+
+    def _files(self) -> list[PurePosixPath]:
+        layout = self.manifest.layout
+        found = {
+            PurePosixPath(path.relative_to(self.root).as_posix())
+            for top in {layout.lib, layout.src, layout.include, layout.tests}
+            for path in self._walk(top)
+            if path.suffix in SOURCE_SUFFIXES | HEADER_SUFFIXES
+        }
+        return sorted(found)
+
+    def _walk(self, top: str) -> Iterator[Path]:
+        for current, directories, names in os.walk(self.root / top):
+            here = Path(current)
+            directories[:] = [
+                d
+                for d in directories
+                if not d.startswith(".") and here / d != self.build_dir.parent
+            ]
+            for name in names:
+                yield here / name

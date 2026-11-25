@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from cxy.core import closure, cmake, conan, tools
+from cxy.core import closure, cmake, conan, formatting, tools
 from cxy.core.cmake import TestProgram
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
@@ -128,11 +128,15 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
         project.root / "conanfile.py": conan.conanfile(project.manifest, standalone=True),
         project.root / "CMakeLists.txt": cmake.cmakelists(project.manifest, sources, graph),
     }
-    conflicts = [
-        path.name
-        for path, text in files.items()
-        if path.exists() and path.read_text(encoding="utf-8", errors="replace") != text
-    ]
+    conflicts = []
+    for path, text in files.items():
+        formatted = _format_export(project, path, text)
+        files[path] = formatted
+        if path.exists():
+            current = path.read_text(encoding="utf-8", errors="replace")
+            # Unformatted files are ours too, from before the formatter was available.
+            if current not in (text, formatted):
+                conflicts.append(path.name)
     if conflicts and not force:
         raise CxyError(
             f"{' and '.join(conflicts)} already exist with different content; "
@@ -143,6 +147,16 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
             tools.status("Wrote", path.name)
         else:
             tools.status("Unchanged", path.name)
+
+
+def _format_export(project: Project, path: Path, text: str) -> str:
+    draft = project.build_dir / "export" / path.name
+    write_if_changed(draft, text)
+    try:
+        return formatting.format_text(text, draft, path, project.manifest.tools)
+    except CxyError as error:
+        tools.status("Note", f"{path.name} is not formatted: {error}")
+        return text
 
 
 def clean(project: Project) -> None:

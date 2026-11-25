@@ -26,6 +26,7 @@ app.command(
     name="export",
     help="Write Conan and CMake files for building without cxy.",
 )
+app.command("cxy.commands.fmt:fmt", name="fmt", help="Format C++, CMake and Conan files.")
 app.command("cxy.commands.clean:clean", name="clean", help="Delete the build directory.")
 
 
