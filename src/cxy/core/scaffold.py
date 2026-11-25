@@ -28,6 +28,14 @@ ColumnLimit: 100
 AllowShortFunctionsOnASingleLine: Empty
 """
 
+_CLANG_TIDY = """\
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*
+"""
+
 _HEADER = """\
 #pragma once
 
@@ -99,6 +107,7 @@ def _create(path: Path, name: str, lib_only: bool) -> None:
     # Leave existing code alone: only add the sample if no source directory exists.
     if not any((path / d).exists() for d in ("lib", "src", "include", "tests")):
         files[".clang-format"] = _CLANG_FORMAT
+        files[".clang-tidy"] = _CLANG_TIDY
         files[f"include/{name}/greeting.hpp"] = _HEADER
         files["lib/greeting.cpp"] = _SOURCE
         files["tests/greeting_test.cpp"] = _TEST

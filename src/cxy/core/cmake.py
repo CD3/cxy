@@ -141,8 +141,10 @@ def cmakelists(
             body += _call("target_compile_features", [target, "PRIVATE", standard])
             body += _link(target, "PRIVATE", [*app_links, *test_links])
             # Different programs may contain tests with the same name.
-            body.append(
-                f'catch_discover_tests({target} DISCOVERY_MODE PRE_TEST TEST_PREFIX "{target}:")'
+            body += _call(
+                "catch_discover_tests",
+                [],
+                [target, "DISCOVERY_MODE PRE_TEST", f'TEST_PREFIX "{target}:"'],
             )
         for program in programs:
             needed = (isolated or {}).get(program.sources[0]) if program.is_unit else None

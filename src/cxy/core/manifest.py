@@ -10,7 +10,7 @@ from typing import Any
 from cxy.core.errors import CxyError
 
 FILENAME = "cxy.toml"
-TOOLS = ("clang-format", "gersemi", "ruff")
+TOOLS = ("clang-format", "clang-tidy", "cmake-lint", "cppcheck", "gersemi", "ruff")
 STANDARDS = (11, 14, 17, 20, 23, 26)
 RESERVED_NAMES = {"all", "clean", "help", "install", "package", "test"}
 _PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
@@ -54,7 +54,7 @@ class Manifest:
     overrides: Mapping[str, str] = field(default_factory=dict)
     layout: Layout = field(default_factory=Layout)
     tools: Mapping[str, str] = field(default_factory=dict)
-    """Pinned versions of formatters."""
+    """Pinned versions of formatters and linters."""
 
 
 def load(path: Path) -> Manifest:

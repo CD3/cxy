@@ -6,6 +6,8 @@
   that cxy does not migrate a shared Conan cache between versions. Tools from a project-level
   cache may turn out to be useful at times, for example to pin versions per project. Revisit
   when there is a concrete need. See `core/tools.py`.
+- **Caching lint results.** clang-tidy runs on every file each time. A cache must account for every
+  included header, including those outside the layout, or it would hide problems.
 
 ## Decided
 
@@ -21,3 +23,6 @@
 - **cxy writes formatted files itself.** Tools only produce text, so check, diff and write modes
   are the same for all of them. Tools are given paths where possible: clang-format 18 does not
   apply `.clang-format-ignore` to stdin, and older gersemi cannot find its configuration for it.
+- **A check that could not run is a failure.** Otherwise a missing tool or compile database would
+  make CI pass. The exception is cmake-lint, which is no longer maintained and so is optional.
+- **cxy never configures a project that it does not manage**, because that runs its code.

@@ -137,7 +137,7 @@ def test_pins():
 def test_every_formatter_can_be_pinned():
     from cxy.core.manifest import TOOLS
 
-    assert {f.tool for f in FORMATTERS} == set(TOOLS)
+    assert {f.tool for f in FORMATTERS} <= set(TOOLS)
 
 
 def test_unformatted_kinds():

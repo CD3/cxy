@@ -182,12 +182,7 @@ def _build(
     targets: Sequence[str],
     isolated: Mapping[str, Sequence[str]] | None = None,
 ) -> Path:
-    sources = project.sources()
-    directory = _prepare(project, options, sources)
-    graph = _install(project, options, directory)
-    root = Path(os.path.relpath(project.root, project.build_dir)).as_posix()
-    text = cmake.cmakelists(project.manifest, sources, graph, root=root, isolated=isolated)
-    _configure(project, options, directory, text)
+    directory = configure(project, options, isolated)
     tools.status("Building", f"{project.manifest.name} ({options.build_type})")
     arguments = ["--build", str(directory), "--target", *targets]
     if options.jobs is not None:
@@ -195,6 +190,21 @@ def _build(
     if options.verbose:
         arguments.append("--verbose")
     tools.run("cmake", *arguments, cwd=project.root)
+    return directory
+
+
+def configure(
+    project: Project,
+    options: BuildOptions,
+    isolated: Mapping[str, Sequence[str]] | None = None,
+) -> Path:
+    """Bring the CMake build directory up to date, and return it."""
+    sources = project.sources()
+    directory = _prepare(project, options, sources)
+    graph = _install(project, options, directory)
+    root = Path(os.path.relpath(project.root, project.build_dir)).as_posix()
+    text = cmake.cmakelists(project.manifest, sources, graph, root=root, isolated=isolated)
+    _configure(project, options, directory, text)
     return directory
 
 

@@ -10,8 +10,8 @@ cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
-Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `export`, `clean`.
-Planned: `add`, `remove`, `lock`, `lint`.
+Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `lint`, `export`, `clean`.
+Planned: `add`, `remove`, `lock`.
 
 ## cxy.toml
 
@@ -35,7 +35,7 @@ catch2 = "3.7.1"
 [overrides]            # versions of transitive dependencies
 fmt = "10.2.0"
 
-[tools]                # optional exact versions of formatters, run with uv
+[tools]                # optional exact versions of formatters and linters, run with uv
 clang-format = "18.1.8"
 
 [layout]               # defaults
@@ -82,6 +82,33 @@ cxy fmt --diff                # ...and show what would change
 In a project that does not use cxy, this covers every file in the git repository that is not
 ignored. Without git, it covers the current directory. A tool with no configuration uses its
 defaults, and cxy says so.
+
+## Linting
+
+```sh
+cxy lint                      # the whole project; fails if there are any problems
+cxy lint lib CMakeLists.txt   # some of it
+cxy lint --fix                # fix what the tools can, then report the rest
+cxy lint --deep               # add slower static analysis
+```
+
+| Files | Tool | Configuration |
+|---|---|---|
+| C++ | clang-tidy | `.clang-tidy` |
+| C++, with `--deep` | cppcheck | |
+| `CMakeLists.txt`, `*.cmake` | cmake-lint, if installed | `.cmake-format.yaml` and others |
+| `conanfile.py` | ruff | `ruff.toml` or `pyproject.toml` |
+
+clang-tidy and cppcheck are not installed with cxy: install them or pin them in `[tools]`. The
+versions of cppcheck and cmake-lint to pin are those of the Python packages `cppcheck` and
+`cmakelang`.
+
+The C++ tools need `compile_commands.json`. cxy configures its own projects to get one. It never
+configures other projects: it searches the usual build directories, or use `--build-dir`. If there
+is none the C++ files are not checked, and the command fails.
+
+Project configuration can run code: cmake-lint reads `.cmake-format.py`, and gersemi can load
+extensions. Be careful when checking a project that you do not trust.
 
 ## Sharing a project with people who do not use cxy
 

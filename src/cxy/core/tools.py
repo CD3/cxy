@@ -4,7 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from cxy.core.errors import CxyError
@@ -12,6 +12,9 @@ from cxy.core.errors import CxyError
 # Tools installed alongside cxy. Searched last, so the user's own tools win: switching
 # between Conan versions would migrate the shared Conan cache back and forth.
 _BUNDLED = str(Path(sys.executable).parent)
+
+# Python packages named differently from the tool they provide.
+_PACKAGES = {"cmake-lint": "cmakelang"}
 
 
 def search_path() -> str:
@@ -34,8 +37,7 @@ def _variable(name: str) -> str:
 def command(name: str, pin: str | None) -> list[str]:
     """Return the command for a tool, at a pinned version if given.
 
-    Pinned tools run through uv, which caches them. They must be Python packages with the
-    same name as the tool.
+    Pinned tools run through uv, which caches them.
     """
     if pin is None or _variable(name) in os.environ:
         return [find(name)]
@@ -43,7 +45,38 @@ def command(name: str, pin: str | None) -> list[str]:
         uv = find("uv")
     except CxyError:
         raise CxyError(f"{name} is pinned to {pin}, which needs uv to be installed") from None
-    return [uv, "tool", "run", "--quiet", "--from", f"{name}=={pin}", name]
+    return [uv, "tool", "run", "--quiet", "--from", f"{_PACKAGES.get(name, name)}=={pin}", name]
+
+
+def prepare(name: str, pins: Mapping[str, str]) -> list[str]:
+    """Return the command for a formatter or linter after making sure that it runs.
+
+    This also installs a pinned tool before many threads need it, and reports a broken tool
+    once instead of for every file.
+    """
+    tool = command(name, pins.get(name))
+    result = subprocess.run(
+        [*tool, "--version"], stdin=subprocess.DEVNULL, capture_output=True, text=True
+    )
+    if result.returncode:
+        raise CxyError(f"cannot run {name}: {result.stderr.strip()}")
+    return tool
+
+
+def nearest_config(path: Path, names: Sequence[str]) -> Path | None:
+    """Return the configuration file that a tool will use for a path."""
+    for directory in path.parents:
+        for name in names:
+            config = directory / name
+            if not config.is_file():
+                continue
+            if name != "pyproject.toml" or b"[tool.ruff" in config.read_bytes():
+                return config
+    return None
+
+
+def has_config(path: Path, names: Sequence[str]) -> bool:
+    return nearest_config(path, names) is not None
 
 
 def identity(name: str) -> list[str | int]:
@@ -79,3 +112,7 @@ def execute(program: Path, arguments: Sequence[str], *, quiet: bool = False) -> 
 
 def status(verb: str, message: str) -> None:
     print(f"{verb:>12} {message}", file=sys.stderr, flush=True)
+
+
+def count(number: int, noun: str = "file") -> str:
+    return f"{number} {noun}{'' if number == 1 else 's'}"

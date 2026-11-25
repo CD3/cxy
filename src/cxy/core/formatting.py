@@ -12,12 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from cxy.core import tools
+from cxy.core import filetypes, tools
 from cxy.core.errors import CxyError
-from cxy.core.project import HEADER_SUFFIXES, SOURCE_SUFFIXES
 from cxy.core.workspace import Workspace
-
-CPP_SUFFIXES = SOURCE_SUFFIXES | HEADER_SUFFIXES | {".cppm", ".inl", ".ipp", ".ixx", ".tpp"}
 
 
 @dataclass(frozen=True)
@@ -52,17 +49,17 @@ class Formatter:
 FORMATTERS = (
     Formatter(
         tool="clang-format",
-        handles=lambda path: path.suffix in CPP_SUFFIXES,
+        handles=filetypes.is_cpp,
         configs=(".clang-format", "_clang-format"),
     ),
     Formatter(
         tool="gersemi",
-        handles=lambda path: path.name == "CMakeLists.txt" or path.suffix == ".cmake",
+        handles=filetypes.is_cmake,
         configs=(".gersemirc",),
     ),
     Formatter(
         tool="ruff",
-        handles=lambda path: path.name == "conanfile.py",
+        handles=filetypes.is_conanfile,
         configs=("ruff.toml", ".ruff.toml", "pyproject.toml"),
         arguments=("format", "--force-exclude", "--stdin-filename"),
         stdin=True,
@@ -95,12 +92,12 @@ def fmt(
         if not chosen:
             continue
         try:
-            command = _prepare(formatter, workspace.pins)
+            command = tools.prepare(formatter.tool, workspace.pins)
         except CxyError as error:
-            tools.status("Failed", f"{error}; skipped {_count(len(chosen))}")
+            tools.status("Failed", f"{error}; skipped {tools.count(len(chosen))}")
             failures += len(chosen)
             continue
-        if not any(_find_config(formatter, path) for path in chosen):
+        if not any(tools.has_config(path, formatter.configs) for path in chosen):
             tools.status(
                 "Note", f"no {formatter.configs[0]} found; using {formatter.tool} defaults"
             )
@@ -127,7 +124,7 @@ def fmt(
     unchanged = sum(not r.changed and r.error is None for r in results)
     report_only = check or diff
     verb = "would be formatted" if report_only else "formatted"
-    summary = f"{_count(changed)} {verb}, {unchanged} unchanged"
+    summary = f"{tools.count(changed)} {verb}, {unchanged} unchanged"
     if failures:
         summary += f", {failures} failed"
     tools.status("Finished", summary)
@@ -138,21 +135,9 @@ def format_text(text: str, path: Path, name: Path, pins: Mapping[str, str]) -> s
     """Format generated text, which is stored in ``path`` and will be called ``name``."""
     for formatter in FORMATTERS:
         if formatter.handles(name):
-            command = _prepare(formatter, pins)
+            command = tools.prepare(formatter.tool, pins)
             return formatter.format(command, text.encode(), path, name).decode()
     return text
-
-
-def _prepare(formatter: Formatter, pins: Mapping[str, str]) -> list[str]:
-    command = tools.command(formatter.tool, pins.get(formatter.tool))
-    # Running it once now installs a pinned tool before many threads need it, and reports
-    # a broken tool once instead of for every file.
-    result = subprocess.run(
-        [*command, "--version"], stdin=subprocess.DEVNULL, capture_output=True, text=True
-    )
-    if result.returncode:
-        raise CxyError(f"cannot run {formatter.tool}: {result.stderr.strip()}")
-    return command
 
 
 def _format_all(
@@ -186,17 +171,6 @@ def _reject_unsupported(paths: Sequence[str]) -> None:
             raise CxyError(f"do not know how to format {name}")
 
 
-def _find_config(formatter: Formatter, path: Path) -> bool:
-    for directory in path.parents:
-        for name in formatter.configs:
-            config = directory / name
-            if not config.is_file():
-                continue
-            if name != "pyproject.toml" or b"[tool.ruff" in config.read_bytes():
-                return True
-    return False
-
-
 def _keep_line_endings(before: bytes, after: bytes) -> bytes:
     """Undo a tool's conversion of CRLF, which gersemi does."""
     if b"\r\n" in before and before.count(b"\r\n") == before.count(b"\n"):
@@ -212,7 +186,3 @@ def _print_diff(label: str, result: Result) -> None:
         lines(result.before), lines(result.after), f"a/{label}", f"b/{label}"
     ):
         print(line, end="" if line.endswith("\n") else "\n\\ No newline at end of file\n")
-
-
-def _count(number: int) -> str:
-    return f"{number} file{'' if number == 1 else 's'}"
