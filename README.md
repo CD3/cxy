@@ -1,7 +1,15 @@
 # cxy
 
-A cargo-like project tool for C++. It reads `cxy.toml`, generates the Conan and CMake
-files, and drives Conan, CMake and Ninja, skipping steps whose inputs have not changed.
+A cargo-like project tool for C++. Rather than reinventing the wheel, `cxy` uses the
+tools that people are already using to manage dependencies, configure builds, run
+builds, format and check code. It even supports exporting projects to "standard"
+Conan/CMake format so you can share it with people that don't want to use it.
+
+## Basic Usage
+
+`cxy` reads `cxy.toml`, generates Conan and CMake
+files, and drives Conan, CMake and Ninja. It also tracks the inputs for each step
+and will skip steps whose inputs have not changed to reduce the edit-compile-run cycle time..
 
 ```sh
 cxy new hello
@@ -11,6 +19,24 @@ cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
 Commands: `new`, `init`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
+
+
+## Why?
+
+Because going from an idea for a library or application to a project that
+compiles is a pain and going from a project that compiles to a project that uses
+best practices is hard.
+
+Tools exist to do everything that is needed, they just have to be setup. Conan does a
+good job managing dependencies and CMake is the defacto build configuration standard
+whether we like it or not. Ninja is a fast build executor, and `clang-tools` can format and check code. `cxy` 
+just brings these tools together in a simple, easy to use tool.
+
+### Why Python?
+
+Because I like Python and it's already a requirement to use Conan. We don't really have to worry about
+performance because most of the work is going to be in dependency resolution and compiling. `cxy` just
+needs to write some configuration files and call commands. Python works great for that.
 
 ## cxy.toml
 
