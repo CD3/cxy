@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import sys
@@ -6,10 +7,11 @@ import sys
 import pytest
 
 
-def cxy(*arguments, cwd):
+def cxy(*arguments, cwd, env=None):
     return subprocess.run(
         [sys.executable, "-c", "from cxy.cli import main; main()", *arguments],
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -504,3 +506,46 @@ def test_gtest_output_is_kept(tmp_path):
     assert cxy("test", "--", f"--gtest_output=json:{output}", cwd=project).returncode == 0
     # A list of tests has no results.
     assert json.loads(output.read_text())["failures"] == 0
+
+
+@pytest.mark.e2e
+def test_ctest(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "cxy.toml").write_text(GTEST_PROJECT + 'catch2 = "3.7.1"\n')
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    (project / "lib" / "unit_test.cpp").write_text(
+        CATCH2_FILE + 'TEST_CASE("crash") { if (std::getenv("DEMO_CRASH")) std::abort(); }\n'
+        'TEST_CASE("after") {}\n'
+    )
+    text = (project / "lib" / "unit_test.cpp").read_text()
+    (project / "lib" / "unit_test.cpp").write_text("#include <cstdlib>\n" + text)
+
+    def test(*arguments, **kwargs):
+        return cxy("test", "--ctest", *arguments, cwd=project, **kwargs)
+
+    def passed(*arguments):
+        result = test(*arguments)
+        assert result.returncode == 0, result.stdout + result.stderr
+        match = re.search(r"100% tests passed.* out of (\d+)\n", result.stdout)
+        assert match, result.stdout
+        return int(match[1])
+
+    # Nothing else has been built yet.
+    assert passed("--test", "unit") == 3
+    assert passed() == 4
+    assert passed("--jobs", "4") == 4
+    assert passed("--filter", "work") == 2
+    assert passed("--test", "unit", "--filter", "catch") == 1
+    # Arguments go to CTest, so it does not matter that there are two frameworks.
+    assert passed("--", "--exclude-regex", "crash") == 3
+    assert test("--filter", "nope").returncode != 0
+    result = test("--test", "unit", "--isolated")
+    assert result.returncode == 1 and "cannot be combined" in result.stderr
+
+    # A crash loses only that test, which can then be run again.
+    environment = {**os.environ, "DEMO_CRASH": "1"}
+    result = test(env=environment)
+    assert result.returncode != 0
+    assert re.search(r"1 tests? failed out of 4\n", result.stdout)
+    assert passed("--", "--rerun-failed") == 1

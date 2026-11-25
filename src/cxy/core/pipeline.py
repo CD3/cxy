@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
@@ -55,6 +56,7 @@ def test(
     names: Sequence[str] = (),
     isolated: bool = False,
     name_filter: str | None = None,
+    ctest: bool = False,
 ) -> int:
     sources = project.sources()
     programs = testing.plan(project, sources)
@@ -66,13 +68,15 @@ def test(
     everything = programs
     programs = _select(project, programs, names)
     used = {program.framework.package for program in programs}
-    if arguments and len(used) > 1:
+    if arguments and len(used) > 1 and not ctest:
         raise CxyError(
             f"these tests use {' and '.join(sorted(used))}, which take different arguments; "
             "use --filter, or --test to choose tests that use one of them"
         )
     needed = None
     if isolated:
+        if ctest:
+            raise CxyError("--isolated and --ctest cannot be combined")
         if not names:
             raise CxyError("--isolated needs --test to choose the tests to build")
         if not all(program.is_unit for program in programs):
@@ -91,6 +95,10 @@ def test(
         }
     targets = [(p, p.isolated_target if isolated else p.target) for p in programs]
     directory = _build(project, options, [target for _, target in targets], needed)
+
+    if ctest:
+        chosen = [program.target for program in programs] if names else []
+        return _run_ctest(directory, options, chosen, name_filter, arguments)
 
     # The same as under CTest, wherever cxy was called from.
     cwd = directory if setting is None else project.root / setting
@@ -115,6 +123,38 @@ def test(
     if failed:
         tools.status("Failed", ", ".join(target for target, _ in failed))
     return failed[0][1] if failed else 0
+
+
+def _run_ctest(
+    directory: Path,
+    options: BuildOptions,
+    targets: Sequence[str],
+    name_filter: str | None,
+    arguments: Sequence[str],
+) -> int:
+    command = ["--no-tests=error", "--verbose" if options.verbose else "--output-on-failure"]
+    if options.jobs is not None:
+        command += ["--parallel", str(options.jobs)]
+    if targets or name_filter:
+        command += ["--tests-regex", ctest_pattern(targets, name_filter)]
+    # Prefer the one that belongs to the CMake that configured the project.
+    cmake_path = Path(tools.find("cmake"))
+    program = cmake_path.with_name(f"ctest{cmake_path.suffix}")
+    if not program.is_file():
+        program = Path(tools.find("ctest"))
+    tools.status("Running", "ctest")
+    return tools.execute(program, [*command, *arguments], directory)
+
+
+def ctest_pattern(targets: Sequence[str], name_filter: str | None) -> str:
+    """Return a regular expression for tests, which are named "<target>:<name>"."""
+
+    def escape(text: str) -> str:
+        return re.sub(r"([.^$*+?()\[\]|\\])", r"\\\1", text)
+
+    # Without a target, any: but only look for the text after the prefix.
+    prefix = f"({'|'.join(map(escape, targets))})" if targets else "[^:]*"
+    return f"^{prefix}:" + (f".*{escape(name_filter)}" if name_filter else "")
 
 
 def _select(

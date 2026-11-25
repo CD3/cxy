@@ -61,6 +61,7 @@ def test(
     tests: Annotated[tuple[str, ...], Parameter(name=["--test", "-t"], negative="")] = (),
     name_filter: Annotated[str | None, Parameter(name=["--filter", "-f"])] = None,
     isolated: Annotated[bool, Parameter(negative="")] = False,
+    ctest: Annotated[bool, Parameter(negative="")] = False,
     options: Options | None = None,
 ) -> int:
     """Build and run the tests.
@@ -77,8 +78,17 @@ def test(
     isolated
         Compile only the sources that the chosen tests need, found by following their
         includes, so that code elsewhere may be broken.
+    ctest
+        Run each test case in its own process with CTest. Arguments after ``--`` go to CTest, and
+        ``--jobs`` also sets how many tests run at once.
     """
     core = (options or Options()).to_core()
     return pipeline.test(
-        Project.find(), core, args, names=tests, isolated=isolated, name_filter=name_filter
+        Project.find(),
+        core,
+        args,
+        names=tests,
+        isolated=isolated,
+        name_filter=name_filter,
+        ctest=ctest,
     )

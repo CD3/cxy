@@ -1,6 +1,8 @@
+import re
+
 import pytest
 
-from cxy.core import cmake, frameworks, testing
+from cxy.core import cmake, frameworks, pipeline, testing
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.manifest import Dependency, parse
@@ -207,3 +209,15 @@ def test_working_directory(root):
     for bad in "../x", "/x":
         with pytest.raises(CxyError, match="inside the project"):
             manifest(extra=f'[test]\nworking-directory = "{bad}"\n')
+
+
+def test_ctest_pattern():
+    pattern = pipeline.ctest_pattern(["app_tests", "app_a+b"], None)
+    assert pattern == r"^(app_tests|app_a\+b):"
+    assert re.search(pattern, "app_tests:x") and not re.search(pattern, "app_tests_gtest:x")
+    pattern = pipeline.ctest_pattern([], "a.b [c]")
+    assert re.search(pattern, "app_tests:has a.b [c]!")
+    assert not re.search(pattern, "app_tests:has aXb [c]!")
+    # The text must be in the name of the test, not of the program.
+    assert not re.search(pipeline.ctest_pattern([], "app"), "app_tests:x")
+    assert re.search(pipeline.ctest_pattern(["app_tests"], "x"), "app_tests:a::x")

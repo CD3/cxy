@@ -200,6 +200,22 @@ cxy test -- --gtest_filter='Suite.*'      # gtest
 
 If the tests use both, choose some with `--test` first: the frameworks take different arguments.
 
+### CTest
+
+`cxy test` runs the test programs directly. `cxy test --ctest` runs them with CTest instead, which
+starts a process for each test case. That is slower, but a crash loses only that test, and CTest has
+features such as timeouts and running failed tests again:
+
+```sh
+cxy test --ctest                          # --test and --filter work too
+cxy test --ctest --jobs 8                 # run tests in parallel
+cxy test --ctest -- --rerun-failed        # arguments after -- go to CTest
+cxy test --ctest -- --timeout 10
+```
+
+Tests run one at a time unless you use `--jobs`: those that write the same file could interfere with
+each other. `--filter` considers case here, whichever the framework.
+
 ## Formatting
 
 ```sh
