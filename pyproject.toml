@@ -27,6 +27,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "poethepoet>=0.49.0",
     "pytest>=9.2.0",
     "ty>=0.0.109",
 ]
@@ -41,3 +42,20 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 testpaths = ["tests"]
 addopts = "-m 'not e2e'"
 markers = ["e2e: runs the real Conan, CMake and compiler (slow, needs network)"]
+
+[tool.poe.tasks.test]
+help = "Run the unit tests"
+cmd = "pytest"
+
+[tool.poe.tasks.lint]
+help = "Run the linter"
+cmd = "ruff check"
+
+[tool.poe.tasks.typecheck]
+help = "Run the type checker"
+cmd = "ty check"
+
+[tool.poe.tasks.check]
+help = "Run the linter, type checker and unit tests"
+sequence = ["lint", "typecheck", "test"]
+ignore_fail = "return_non_zero"  # Run them all, even if one fails.

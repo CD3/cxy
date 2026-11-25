@@ -167,7 +167,10 @@ version pinned in `[tools]` is used, then `PATH`, then the copies installed with
 ## Development
 
 ```sh
-uv run pytest            # fast tests
-uv run pytest -m e2e     # real builds; set CONAN_HOME to isolate the Conan cache
-uv run ruff check && uv run ruff format --check && uv run ty check
+uv run poe check         # lint, typecheck and test
+uv run poe lint          # ruff
+uv run poe typecheck     # ty
+uv run poe test          # unit tests
+uv run poe test -m e2e   # real builds; set CONAN_HOME to isolate the Conan cache
+uv run ruff format       # format the code
 ```
