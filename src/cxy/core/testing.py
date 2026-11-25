@@ -74,6 +74,16 @@ def detect(project: Project, source: str) -> set[str]:
     return found
 
 
+def _unavailable(manifest: Manifest, source: str, framework: str, available: list[str]) -> CxyError:
+    message = (
+        f"{source} uses {framework}, but [dev-dependencies] only has {' and '.join(available)}"
+    )
+    for dependency in manifest.dependencies:
+        if dependency.name == framework:
+            return CxyError(f"{message}; move {framework} there from [dependencies]")
+    return CxyError(f"{message}; add it with 'cxy add --dev {framework}'")
+
+
 def plan_programs(
     manifest: Manifest,
     sources: Sources,
@@ -101,9 +111,13 @@ def plan_programs(
         raise CxyError(f"test.framework is {preferred}, which is not in [dev-dependencies]")
 
     def choose(source: str) -> str | None:
+        included = set(classify(source))
+        found = sorted(included & set(available))
+        if included and not found:
+            # With another framework's main(), these tests would be built but never run.
+            raise _unavailable(manifest, source, min(included), available)
         if len(available) == 1:
             return available[0]
-        found = sorted(set(classify(source)) & set(available))
         if len(found) > 1:
             raise CxyError(
                 f"{source} includes both {' and '.join(found)}, but one program can only run "

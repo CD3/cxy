@@ -26,13 +26,25 @@ TESTS = Sources(unit_tests=("lib/a_test.cpp",), tests=("tests/b.cpp", "tests/c.c
 
 
 @pytest.mark.parametrize("name", ["catch2", "gtest"])
-def test_one_framework_needs_no_classification(name):
-    def fail(_):
-        raise AssertionError
-
-    programs = plan_programs(manifest(f'{name} = "1"\n'), TESTS, fail)
+@pytest.mark.parametrize("included", [set(), {"catch2", "gtest"}])
+def test_one_framework(name, included):
+    programs = plan_programs(manifest(f'{name} = "1"\n'), TESTS, lambda _: included or {name})
     assert [p.target for p in programs] == ["app_lib_a_test", "app_tests"]
     assert {p.framework.package for p in programs} == {name}
+
+
+@pytest.mark.parametrize("separate", ["", "[test]\nseparate = true\n"])
+@pytest.mark.parametrize(
+    "sources", [Sources(unit_tests=("lib/a_test.cpp",)), Sources(tests=("tests/b.cpp",))]
+)
+def test_using_a_framework_that_is_not_available(sources, separate):
+    def check(extra, message):
+        project = manifest('catch2 = "3.7.1"\n', extra + separate)
+        with pytest.raises(CxyError, match=message):
+            plan_programs(project, sources, lambda _: {"gtest"})
+
+    check("", "uses gtest, but .* only has catch2; add it with 'cxy add --dev gtest'")
+    check('[dependencies]\ngtest = "1"\n', r"move gtest there from \[dependencies\]")
 
 
 def test_both_frameworks():
