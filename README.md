@@ -54,8 +54,12 @@ zlib = { version = "1.3.1", force = true }
 # Replace the detected CMake names:
 openssl = { version = "3.3.2", cmake = { package = "OpenSSL", targets = ["OpenSSL::SSL"] } }
 
-[dev-dependencies]
-catch2 = "3.7.1"
+[dev-dependencies]     # only for tests
+catch2 = "3.7.1"       # or gtest, or both
+
+[test]                 # optional
+framework = "catch2"   # for tests that do not show which framework they use
+separate = false       # whether each test file in tests/ is its own program
 
 [overrides]            # versions of transitive dependencies
 fmt = "10.2.0"
@@ -74,7 +78,8 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 
 - `src/main.cpp` is the application. Other `src/` files are shared with the tests.
 - A source matching `test-patterns` beside the code it tests becomes its own test program.
-- Everything in `tests/` goes into one test program.
+- Everything in `tests/` goes into one test program for each test framework, unless `separate` is
+  set.
 - Layout directories may coincide, for example `lib = "src"` and `include = "src"`.
 
 ## Dependencies
@@ -118,19 +123,66 @@ cxy test --test http --isolated    # ...without compiling unrelated sources
 cxy test --filter timeout          # only tests with this in their names
 ```
 
-Catch2 and gtest are supported: add either to `[dev-dependencies]`, such as with
-`cxy add --dev gtest`. With both, each test uses the one that it includes, and `tests/` becomes
-one program for each. A single program cannot use both. If cxy cannot tell which one some tests
-use, say so:
-
-```toml
-[test]
-framework = "gtest"
-```
-
 Test programs normally link the whole library. `--isolated` instead compiles only the sources
 a test needs, so you can port code one file at a time after a breaking change. It finds them by
 following includes, and assumes that `http.hpp` is implemented in `http.cpp`.
+
+### Test frameworks
+
+Catch2 (version 3) and gtest are supported. New projects use Catch2. To use gtest, add it:
+
+```sh
+cxy add --dev gtest
+cxy remove catch2      # unless you want both
+```
+
+Either framework supplies `main()`, but your tests can define their own instead. gmock is linked
+too, if the gtest package was built with it.
+
+With both frameworks, for example while moving from one to the other, each test uses the one that
+it includes, directly or through the project's headers:
+
+- A test beside a source uses its own framework.
+- `tests/` becomes two programs, such as `hello_tests_catch2` and `hello_tests_gtest`. Files that
+  include neither framework are compiled into both.
+- One file cannot include both. Each framework has a `main()`, and the linker might silently choose
+  one, so that the other's tests never run.
+
+If cxy cannot tell which framework some tests use, it stops and asks you to set `framework` in the
+`[test]` section.
+
+### Separate programs in `tests/`
+
+```toml
+[test]
+separate = true
+```
+
+This makes each test file in `tests/` its own program, as tests beside sources always are. Use it if
+files reuse the same test names, which is common in projects that were built that way, or to build
+one file at a time. Linking takes longer, as there are more programs.
+
+A test file is one that matches `test-patterns` or uses a macro such as `TEST` or `TEST_CASE`. The
+others in `tests/` are helpers, such as a custom `main()`, and are compiled into every program.
+
+### Choosing tests
+
+`--test` takes the name of a test program. For a test with its own program, it also takes the
+test's path or name, or the name of the source it tests. `tests` means everything in `tests/`. If
+that is one program, use `--filter` to run only some of it. `--test` may be repeated.
+
+`--filter` works with either framework. It ignores case with Catch2 but not with gtest. It need not
+match something in every program, but `cxy test` fails if it matches nothing at all, which gtest
+alone would call a success.
+
+Arguments after `--` go to the test programs unchanged, so they depend on the framework:
+
+```sh
+cxy test -- "[some-tag]"                  # Catch2
+cxy test -- --gtest_filter='Suite.*'      # gtest
+```
+
+If the tests use both, choose some with `--test` first: the frameworks take different arguments.
 
 ## Formatting
 

@@ -123,3 +123,69 @@ def test_cmake_for_both():
 def test_filters():
     assert frameworks.CATCH2.filter_arguments("a, [b]") == ["*a\\, \\[b]*"]
     assert frameworks.GTEST.filter_arguments("Suite.a-b") == ["--gtest_filter=*Suite.a?b*"]
+
+
+def test_separate():
+    sources = Sources(
+        unit_tests=("lib/a_test.cpp",),
+        tests=("tests/b.cpp", "tests/helper.cpp", "tests/main.cpp", "tests/sub/c.cpp"),
+    )
+    classes = {
+        "lib/a_test.cpp": {"gtest"},
+        "tests/b.cpp": {"catch2"},
+        "tests/main.cpp": {"gtest"},
+        "tests/sub/c.cpp": {"gtest"},
+    }
+    programs = plan_programs(
+        manifest(extra="[test]\nseparate = true\n"),
+        sources,
+        lambda s: classes.get(s, set()),
+        lambda s: s in ("tests/b.cpp", "tests/sub/c.cpp"),
+    )
+    # A helper for one framework is only for its tests.
+    assert {p.target: (p.framework.package, p.sources, p.in_tests) for p in programs} == {
+        "app_lib_a_test": ("gtest", ("lib/a_test.cpp",), False),
+        "app_tests_b": ("catch2", ("tests/b.cpp", "tests/helper.cpp"), True),
+        "app_tests_sub_c": (
+            "gtest",
+            ("tests/sub/c.cpp", "tests/helper.cpp", "tests/main.cpp"),
+            True,
+        ),
+    }
+    assert all(p.is_unit for p in programs)
+
+
+def test_separate_errors():
+    with pytest.raises(CxyError, match="true or false"):
+        manifest(extra="[test]\nseparate = 1\n")
+    with pytest.raises(CxyError, match="no tests found in tests/"):
+        plan_programs(
+            manifest('gtest = "1"\n', "[test]\nseparate = true\n"),
+            Sources(tests=("tests/helper.cpp",)),
+            lambda _: set(),
+            lambda _: False,
+        )
+    assert plan(Sources(lib=("a.cpp",)), extra="[test]\nseparate = true\n") == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "expected"),
+    [
+        ("a.cpp", "TEST(A, b) {}", True),
+        ("a.cpp", "  TEST_F (A, b) {}", True),
+        ("a.cpp", "TYPED_TEST(A, b) {}", True),
+        ("a.cpp", 'TEST_CASE("x") {}', True),
+        ("a.cpp", 'TEMPLATE_TEST_CASE("x", "", int) {}', True),
+        ("a.cpp", 'CATCH_TEST_CASE("x") {}', True),
+        ("a.cpp", 'SCENARIO("x") {}', True),
+        ("a.cpp", "// TEST(A, b) {}", False),
+        ("a.cpp", "int main() {}", False),
+        ("a.cpp", "MY_TEST_HELPER(x)", False),
+        ("a_test.cpp", "MY_OWN_MACRO(x)", True),
+    ],
+)
+def test_is_test(tmp_path, name, text, expected):
+    (tmp_path / "cxy.toml").write_text('[package]\nname = "app"\nversion = "1"\n')
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / name).write_text(f"#include <x>\n{text}\n")
+    assert testing.is_test(Project.find(tmp_path), f"tests/{name}") is expected

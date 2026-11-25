@@ -60,6 +60,7 @@ def test(
     programs = testing.plan(project, sources)
     if not programs:
         raise CxyError("no tests found")
+    everything = programs
     programs = _select(project, programs, names)
     used = {program.framework.package for program in programs}
     if arguments and len(used) > 1:
@@ -73,8 +74,18 @@ def test(
             raise CxyError("--isolated needs --test to choose the tests to build")
         if not all(program.is_unit for program in programs):
             directory = project.manifest.layout.tests
-            raise CxyError(f"--isolated only works for tests beside sources, not {directory}/")
-        needed = {test: closure.needed(project, sources, test) for test in sources.unit_tests}
+            raise CxyError(
+                f"--isolated needs a test that is its own program, and those in {directory}/ "
+                "share one; set separate = true in the [test] section of cxy.toml, or move the "
+                "test beside its source"
+            )
+        needed = {
+            program.sources[0]: sorted(
+                {file for s in program.sources for file in closure.needed(project, sources, s)}
+            )
+            for program in everything
+            if program.is_unit
+        }
     targets = [(p, p.isolated_target if isolated else p.target) for p in programs]
     directory = _build(project, options, [target for _, target in targets], needed)
 
@@ -121,7 +132,7 @@ def _select(
                     or path == project.root / program.sources[0]
                 )
             )
-            or (not program.is_unit and name in together)
+            or (program.in_tests and name in together)
         ]
         if not matches:
             available = ", ".join(p.sources[0] if p.is_unit else p.target for p in programs)

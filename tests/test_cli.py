@@ -407,3 +407,38 @@ def test_main_in_a_dependency_does_not_replace_the_frameworks(tmp_path, compiled
     result = cxy("test", cwd=project)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[  PASSED  ] 1 test." in result.stdout
+
+
+@pytest.mark.e2e
+def test_separate_programs(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    tests = project / "tests"
+    (tests / "greeting_test.cpp").unlink()
+    # Both define Same.name, so they cannot be in one program. Both need the helper.
+    for name in "one", "two":
+        (tests / f"{name}.cpp").write_text(
+            "#include <gtest/gtest.h>\nint helper();\n"
+            "TEST(Same, name) { EXPECT_EQ(helper(), 1); }\n"
+        )
+    (tests / "helper.cpp").write_text("int helper() { return 1; }\n")
+    (project / "cxy.toml").write_text(GTEST_PROJECT)
+    assert cxy("test", cwd=project).returncode == 1
+    (project / "cxy.toml").write_text(GTEST_PROJECT + "[test]\nseparate = true\n")
+
+    def ok(*arguments):
+        result = cxy("test", *arguments, cwd=project)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.count("[  PASSED  ] 1 test.")
+
+    assert ok() == 2
+    assert ok("--test", "tests") == 2
+    assert ok("--test", "one") == 1
+    assert ok("--test", "tests/two.cpp") == 1
+
+    assert cxy("export", cwd=project).returncode == 0
+    assert re.search(r"100% tests passed.* out of 2\n", ctest(project))
+
+    (project / "lib" / "broken.cpp").write_text("int broken() { return renamed(); }\n")
+    assert cxy("test", "--test", "one", cwd=project).returncode == 1
+    assert ok("--test", "one", "--isolated") == 1

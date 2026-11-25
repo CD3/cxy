@@ -10,6 +10,12 @@ from cxy.core.frameworks import Framework
 from cxy.core.manifest import Manifest
 from cxy.core.project import Project, Sources
 
+_TEST_MACRO = re.compile(
+    r"^[ \t]*(?:(?:TYPED_)?TEST(?:_[FP])?|(?:CATCH_)?SCENARIO(?:_METHOD)?"
+    r"|[A-Z_]*TEST_CASE[A-Z_]*)[ \t]*\(",
+    re.MULTILINE,
+)
+
 
 @dataclass(frozen=True)
 class TestProgram:
@@ -17,8 +23,14 @@ class TestProgram:
 
     target: str
     sources: tuple[str, ...]
+    """The sources to compile. If ``is_unit``, the first is the test and the rest are helpers."""
+
     is_unit: bool
+    """Whether this is for a single test file."""
+
     framework: Framework
+    in_tests: bool = False
+    """Whether the test is in the tests directory."""
 
     @property
     def isolated_target(self) -> str:
@@ -26,7 +38,20 @@ class TestProgram:
 
 
 def plan(project: Project, sources: Sources) -> list[TestProgram]:
-    return plan_programs(project.manifest, sources, lambda source: detect(project, source))
+    return plan_programs(
+        project.manifest,
+        sources,
+        lambda source: detect(project, source),
+        lambda source: is_test(project, source),
+    )
+
+
+def is_test(project: Project, source: str) -> bool:
+    """Whether a source in the tests directory has tests, rather than being a helper."""
+    if closure.tested_name(project, source) is not None:
+        return True
+    text = (project.root / source).read_text(encoding="utf-8", errors="replace")
+    return _TEST_MACRO.search(text) is not None
 
 
 def detect(project: Project, source: str) -> set[str]:
@@ -50,9 +75,15 @@ def detect(project: Project, source: str) -> set[str]:
 
 
 def plan_programs(
-    manifest: Manifest, sources: Sources, classify: Callable[[str], Set[str]]
+    manifest: Manifest,
+    sources: Sources,
+    classify: Callable[[str], Set[str]],
+    is_test: Callable[[str], bool] = lambda _: True,
 ) -> list[TestProgram]:
-    """Plan the programs, using ``classify`` to find which frameworks a source includes.
+    """Plan the programs.
+
+    ``classify`` finds which frameworks a source includes, and ``is_test`` whether a source in
+    the tests directory has tests.
 
     Each program has one framework. Each framework has a main(), and with two of them the
     linker may silently choose one, so that the other's tests never run.
@@ -87,15 +118,23 @@ def plan_programs(
         )
 
     name = manifest.name
+    chosen = {source: choose(source) for source in sources.tests}
+    separate: list[str] = []
+    if manifest.test_separate and sources.tests:
+        separate = [source for source in sources.tests if is_test(source)]
+        if not separate:
+            raise CxyError(f"no tests found in {manifest.layout.tests}/")
+
     groups: dict[str, list[str]] = {}
     shared: list[str] = []
-    for source in sources.tests:
-        framework = choose(source)
+    for source, framework in chosen.items():
         if framework is None:
             shared.append(source)
         else:
             groups.setdefault(framework, []).append(source)
-    if shared and not groups:
+    if separate:
+        groups = {}
+    elif shared and not groups:
         if preferred is None:
             raise undecided(f"{manifest.layout.tests}/")
         groups[preferred] = []
@@ -103,10 +142,18 @@ def plan_programs(
     used = {name, f"{name}_lib", f"{name}_app", f"{name}_tests"}
     used |= {f"{name}_tests_{framework}" for framework in groups}
     programs = []
-    for source in sources.unit_tests:
-        framework = choose(source) or preferred
+    for source in (*sources.unit_tests, *separate):
+        in_tests = source in chosen
+        framework = (chosen[source] if in_tests else choose(source)) or preferred
         if framework is None:
             raise undecided(source)
+        helpers: list[str] = []
+        if in_tests:
+            helpers = [
+                helper
+                for helper in sources.tests
+                if helper not in separate and chosen[helper] in (None, framework)
+            ]
         stem = re.sub(r"[^A-Za-z0-9_]", "_", source.rpartition(".")[0])
         base = target = f"{name}_{stem}"
         number = 2
@@ -114,10 +161,14 @@ def plan_programs(
             target = f"{base}_{number}"
             number += 1
         used |= {target, f"{target}_isolated"}
-        programs.append(TestProgram(target, (source,), True, frameworks.ALL[framework]))
+        programs.append(
+            TestProgram(
+                target, (source, *helpers), True, frameworks.ALL[framework], in_tests=in_tests
+            )
+        )
     for framework in sorted(groups):
         # Files that use neither framework are helpers, which any of the programs may need.
         files = tuple(sorted([*groups[framework], *shared]))
         target = f"{name}_tests" if len(groups) == 1 else f"{name}_tests_{framework}"
-        programs.append(TestProgram(target, files, False, frameworks.ALL[framework]))
+        programs.append(TestProgram(target, files, False, frameworks.ALL[framework], in_tests=True))
     return programs

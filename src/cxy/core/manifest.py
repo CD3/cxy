@@ -57,6 +57,9 @@ class Manifest:
     test_framework: str | None = None
     """The framework of tests that do not show which they use."""
 
+    test_separate: bool = False
+    """Whether each test in the tests directory is its own program."""
+
     tools: Mapping[str, str] = field(default_factory=dict)
     """Pinned versions of formatters and linters."""
 
@@ -111,6 +114,7 @@ def parse(text: str) -> Manifest:
         overrides=overrides,
         layout=_layout(_table(data, "layout")),
         test_framework=_test_framework(_table(data, "test")),
+        test_separate=_boolean(_table(data, "test").get("separate", False), "test.separate"),
         tools=_tools(_table(data, "tools")),
     )
 
@@ -140,9 +144,7 @@ def _dependency(name: str, value: Any, where: str) -> Dependency:
     if not isinstance(value, dict):
         raise CxyError(f"{where} must be a version string or a table")
     _known(value, {"version", "options", "force", "cmake"}, where)
-    force = value.get("force", False)
-    if not isinstance(force, bool):
-        raise CxyError(f"{where}.force must be true or false")
+    force = _boolean(value.get("force", False), f"{where}.force")
     options = _table(value, "options", where)
     for key, option in options.items():
         if not isinstance(option, (str, bool, int)):
@@ -188,7 +190,7 @@ def _layout(table: Mapping[str, Any]) -> Layout:
 
 
 def _test_framework(table: Mapping[str, Any]) -> str | None:
-    _known(table, {"framework"}, "[test]")
+    _known(table, {"framework", "separate"}, "[test]")
     framework = table.get("framework")
     if framework is not None and framework not in TEST_FRAMEWORKS:
         raise CxyError(f"test.framework must be one of {', '.join(TEST_FRAMEWORKS)}")
@@ -224,6 +226,12 @@ def _table(data: Mapping[str, Any], key: str, where: str = "") -> dict[str, Any]
 def _string(value: Any, where: str) -> str:
     if not isinstance(value, str) or not value.strip() or not value.isprintable():
         raise CxyError(f"{where} must be a non-empty string")
+    return value
+
+
+def _boolean(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise CxyError(f"{where} must be true or false")
     return value
 
 
