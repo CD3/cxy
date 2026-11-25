@@ -3,11 +3,14 @@
 import re
 import shutil
 import subprocess
+from collections.abc import Set
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from cxy.core import manifest as manifests
-from cxy.core import tools
+from cxy.core import testing, tools
 from cxy.core.errors import CxyError
+from cxy.core.project import SOURCE_SUFFIXES, Project
 
 _MANIFEST = """\
 [package]
@@ -18,8 +21,9 @@ std = 20
 [dependencies]
 
 [dev-dependencies]
-catch2 = "3.7.1"
 """
+
+_FRAMEWORK_VERSIONS = {"catch2": "3.7.1", "gtest": "1.17.0"}
 
 _CLANG_FORMAT = """\
 BasedOnStyle: Google
@@ -103,7 +107,8 @@ def _resolve_name(path: Path, name: str | None) -> str:
 
 
 def _create(path: Path, name: str, lib_only: bool) -> None:
-    files = {manifests.FILENAME: _MANIFEST, ".gitignore": "/build/\n/CMakeUserPresets.json\n"}
+    files = {".gitignore": "/build/\n/CMakeUserPresets.json\n"}
+    frameworks: Set[str]
     # Leave existing code alone: only add the sample if no source directory exists.
     if not any((path / d).exists() for d in ("lib", "src", "include", "tests")):
         files[".clang-format"] = _CLANG_FORMAT
@@ -113,6 +118,12 @@ def _create(path: Path, name: str, lib_only: bool) -> None:
         files["tests/greeting_test.cpp"] = _TEST
         if not lib_only:
             files["src/main.cpp"] = _MAIN
+        frameworks = {"catch2"}
+    else:
+        frameworks = _used_frameworks(path, name)
+    files[manifests.FILENAME] = _MANIFEST + "".join(
+        f'{framework} = "{_FRAMEWORK_VERSIONS[framework]}"\n' for framework in sorted(frameworks)
+    )
     namespace = re.sub(r"-", "_", name)
     for relative, template in files.items():
         target = path / relative
@@ -122,6 +133,21 @@ def _create(path: Path, name: str, lib_only: bool) -> None:
         target.write_text(template.format(name=name, ns=namespace), encoding="utf-8", newline="")
     _git_init(path)
     tools.status("Created", f"{'library' if lib_only else 'application'} {name!r}")
+
+
+def _used_frameworks(path: Path, name: str) -> set[str]:
+    """Return the test frameworks that existing tests include."""
+    project = Project(path.resolve(), manifests.parse(_MANIFEST.format(name=name)))
+    layout = project.manifest.layout
+    found: set[str] = set()
+    for file in project.files():
+        relative = file.relative_to(project.root)
+        is_test = relative.is_relative_to(layout.tests) or any(
+            fnmatchcase(file.name, pattern) for pattern in layout.test_patterns
+        )
+        if is_test and file.suffix in SOURCE_SUFFIXES:
+            found |= testing.detect(project, relative.as_posix())
+    return found
 
 
 def _git_init(path: Path) -> None:
