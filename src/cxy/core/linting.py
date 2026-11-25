@@ -7,13 +7,14 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from cxy.core import filetypes, pipeline, tools
 from cxy.core.errors import CxyError
 from cxy.core.pipeline import BuildOptions
 from cxy.core.workspace import Workspace
 
+_SLASH = r"[/\\]"
 DATABASE = "compile_commands.json"
 
 # The checks clang-tidy enabled by default until it stopped having any. They need no
@@ -322,7 +323,14 @@ def _header_filter(context: Context) -> str:
             for path in context.choose(filetypes.is_cpp)
             if path.is_relative_to(root)
         }
-    return f"^({'|'.join(_escape(str(path)) for path in sorted(roots))})(/|$)"
+    return header_pattern(sorted(roots))
+
+
+def header_pattern(roots: Sequence[PurePath]) -> str:
+    """Return a regular expression for paths in these roots, with either kind of slash."""
+    # clang-tidy on Windows uses both in one path.
+    patterns = (_SLASH.join(map(_escape, path.as_posix().split("/"))) for path in roots)
+    return f"^({'|'.join(patterns)})({_SLASH}|$)"
 
 
 def _escape(text: str) -> str:

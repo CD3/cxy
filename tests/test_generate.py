@@ -85,7 +85,7 @@ def test_standalone_files_do_not_depend_on_cxy():
     assert 'check_min_cppstd(self, "20")' in conanfile
     cmakelists = cmake.cmakelists(MANIFEST, Sources(lib=("lib/a.cpp",)), {})
     assert "cxy" not in conanfile + cmakelists
-    assert "ROOT_DIR" not in cmakelists
+    assert "ROOT_DIR" not in cmakelists and "WIN32" not in cmakelists
 
 
 def test_cmake_errors():

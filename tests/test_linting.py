@@ -1,8 +1,10 @@
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -92,7 +94,8 @@ def test_reports_source_and_header_once(make, capsys):
     assert lint(workspace) == 1
     out = capsys.readouterr().out
     assert out.count("a.cpp:4:10: warning") == 1
-    assert out.count("include/h.hpp:2:1: warning") == 1
+    header = os.path.join("include", "h.hpp")
+    assert out.count(f"{header}:2:1: warning") == 1
     assert lint(workspace, ["b.cpp"]) == 0
     assert lint(workspace, ["include/h.hpp"]) == 1
 
@@ -169,14 +172,22 @@ def test_source_missing_from_database(make, capsys, monkeypatch):
 
 def test_find_database_prefers_the_newest(tmp_path):
     assert find_database(tmp_path) is None
-    import os
-
     for number, name in enumerate(["build/Debug", "build/Release"]):
         path = tmp_path / name / linting.DATABASE
         path.parent.mkdir(parents=True)
         path.touch()
         os.utime(path, (100 - number, 100 - number))
     assert find_database(tmp_path) == tmp_path / "build/Debug" / linting.DATABASE
+
+
+def test_header_pattern():
+    windows = linting.header_pattern([PureWindowsPath("C:/My (x)/include")])
+    for path in r"C:\My (x)\include\a.hpp", r"C:/My (x)/include\a.hpp", "C:/My (x)/include":
+        assert re.search(windows, path)
+    posix = linting.header_pattern([PurePosixPath("/r/a"), PurePosixPath("/r/b.hpp")])
+    assert re.search(posix, "/r/a/x.hpp") and re.search(posix, "/r/b.hpp")
+    for path in "/r/ab/x.hpp", "/q/r/a/x.hpp", "/r/b.hppx":
+        assert not re.search(posix, path)
 
 
 def test_unknown_file(make):
