@@ -30,6 +30,7 @@ app.command("cxy.commands.fmt:fmt", name="fmt", help="Format C++, CMake and Cona
 app.command(
     "cxy.commands.lint:lint", name="lint", help="Find problems in C++, CMake and Conan files."
 )
+app.command("cxy.commands.lock:lock", name="lock", help="Record exact dependency versions.")
 app.command("cxy.commands.clean:clean", name="clean", help="Delete the build directory.")
 
 

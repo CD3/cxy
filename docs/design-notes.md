@@ -26,3 +26,8 @@
 - **A check that could not run is a failure.** Otherwise a missing tool or compile database would
   make CI pass. The exception is cmake-lint, which is no longer maintained and so is optional.
 - **cxy never configures a project that it does not manage**, because that runs its code.
+- **`cxy.lock` wraps Conan's lockfile with the settings it was made from.** Conan's lockfile records
+  overrides that win over the recipe's, even in strict mode, so on its own it would silently ignore
+  changes to `[overrides]`. cxy compares the settings, and discards recorded overrides when resolving.
+- **A lock is pruned only when dependencies change**, since Conan cannot tell unneeded entries from
+  those for other platforms.

@@ -1,5 +1,6 @@
 """Drive Conan, CMake and Ninja, running each only when needed."""
 
+import json
 import os
 import shutil
 import sys
@@ -8,9 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cxy.core import closure, cmake, conan, formatting, tools
+from cxy.core import lock as locks
 from cxy.core.cmake import TestProgram
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
+from cxy.core.lock import Lock
 from cxy.core.project import Project, Sources
 from cxy.core.stamp import Stamp, write_if_changed
 
@@ -25,6 +28,7 @@ class BuildOptions:
     profile: str = "default"
     jobs: int | None = None
     refresh: bool = False
+    locked: bool = False
     verbose: bool = False
 
     @property
@@ -128,6 +132,8 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
         project.root / "conanfile.py": conan.conanfile(project.manifest, standalone=True),
         project.root / "CMakeLists.txt": cmake.cmakelists(project.manifest, sources, graph),
     }
+    if (lock := Lock.load(project.root / locks.FILENAME)) is not None:
+        files[project.root / "conan.lock"] = lock.conan_text()
     conflicts = []
     for path, text in files.items():
         formatted = _format_export(project, path, text)
@@ -147,6 +153,126 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
             tools.status("Wrote", path.name)
         else:
             tools.status("Unchanged", path.name)
+
+
+def lock(
+    project: Project,
+    options: BuildOptions,
+    *,
+    check: bool = False,
+    upgrade: bool = False,
+    upgrade_packages: Sequence[str] = (),
+) -> None:
+    """Bring cxy.lock up to date without installing anything."""
+    _create_build_dir(project)
+    _ensure_profile(project, options)
+    conanfile = _write_conanfile(project)
+    directory = project.build_dir / options.build_type.lower()
+    path = project.root / locks.FILENAME
+    current = Lock.load(path)
+    base = current
+    update: list[str] = []
+    if check:
+        if upgrade or upgrade_packages:
+            raise CxyError("--check cannot be combined with upgrading")
+        _require_current(project, current)
+    elif upgrade:
+        base = None
+        update = ["--update"]
+    else:
+        for name in upgrade_packages:
+            if base is None:
+                raise CxyError(f"there is no {locks.FILENAME} to upgrade")
+            base = base.without_package(name)
+            update.append(f"--update={name}")
+    arguments, output = _lock_arguments(project, directory, base, locked=check)
+    # "lock create" accepts requirements that are not locked, whatever its arguments.
+    command = ["graph", "info"] if check else ["lock", "create"]
+    _run_locked(
+        project,
+        check,
+        [*command, str(conanfile), *_conan_arguments(project, options)],
+        [*arguments, *update],
+    )
+    if check:
+        tools.status("Checked", f"{locks.FILENAME} is up to date")
+    elif not _save_lock(project, current, output):
+        tools.status("Unchanged", locks.FILENAME)
+
+
+def _lock_arguments(
+    project: Project, directory: Path, base: Lock | None, *, locked: bool
+) -> tuple[list[str], Path]:
+    """Return Conan's lockfile arguments, and where it will write the new lockfile."""
+    output = directory / "lock" / "out.lock"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
+    arguments = [f"--lockfile-out={output}"]
+    if base is None:
+        return ["--lockfile=", *arguments], output
+    source = directory / "lock" / "in.lock"
+    arguments.append(f"--lockfile={source}")
+    if not locked:
+        arguments.append("--lockfile-partial")
+        if not base.matches(project.manifest):
+            # Drop what is no longer needed. Otherwise keep everything, since some of it may
+            # be for other platforms.
+            arguments.append("--lockfile-clean")
+        base = base.without_overrides()
+    write_if_changed(source, base.conan_text())
+    return arguments, output
+
+
+def _save_lock(project: Project, before: Lock | None, output: Path) -> bool:
+    """Update cxy.lock from a lockfile written by Conan."""
+    try:
+        conan_lock = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CxyError(f"cannot read the lockfile that Conan wrote: {error}") from error
+    after = Lock(locks.inputs(project.manifest), conan_lock)
+    if not after.save(project.root / locks.FILENAME):
+        return False
+    tools.status("Locked", f"{tools.count(len(after.packages()), 'package')}")
+    if before is not None:
+        for change in locks.changes(before, after):
+            tools.status("", change)
+    return True
+
+
+def _require_current(project: Project, lock: Lock | None) -> None:
+    if lock is None:
+        raise CxyError(f"there is no {locks.FILENAME}; run 'cxy lock'")
+    if not lock.matches(project.manifest):
+        raise CxyError(f"{locks.FILENAME} does not match cxy.toml; run 'cxy lock'")
+
+
+def _run_locked(
+    project: Project, locked: bool, command: Sequence[str], arguments: Sequence[str]
+) -> str:
+    try:
+        return tools.run("conan", *command, *arguments, cwd=project.root, capture=True)
+    except CxyError as error:
+        if not locked:
+            raise
+        raise CxyError(
+            f"{error}; if a requirement is not in {locks.FILENAME}, run 'cxy lock' with this "
+            "platform and profile"
+        ) from error
+
+
+def _write_conanfile(project: Project) -> Path:
+    path = project.build_dir / "conanfile.py"
+    write_if_changed(path, conan.conanfile(project.manifest))
+    return path
+
+
+def _conan_arguments(project: Project, options: BuildOptions) -> list[str]:
+    return [
+        f"--profile:all={options.profile}",
+        f"--settings:host=build_type={options.build_type}",
+        f"--settings:host=compiler.cppstd={project.manifest.std}",
+        "-vverbose" if options.verbose else "-vwarning",
+    ]
 
 
 def _format_export(project: Project, path: Path, text: str) -> str:
@@ -217,46 +343,53 @@ def _create_build_dir(project: Project) -> None:
 
 
 def _install(project: Project, options: BuildOptions, directory: Path) -> dict[str, CMakeInfo]:
-    conanfile = project.build_dir / "conanfile.py"
-    text = conan.conanfile(project.manifest)
-    write_if_changed(conanfile, text)
+    conanfile = _write_conanfile(project)
+    lock_path = project.root / locks.FILENAME
+    lock = Lock.load(lock_path)
+    if options.locked:
+        _require_current(project, lock)
 
     output = directory / "conan"
     graph_file = output / "graph.json"
     toolchain = output / "conan_toolchain.cmake"
     _ensure_profile(project, options)
-    stamp = Stamp(
-        directory / "conan.stamp",
-        text,
-        options.profile,
-        _conan_config(options.profile),
-        project.manifest.std,
-        tools.identity("conan"),
-    )
-    if not options.refresh and stamp.is_current(graph_file, toolchain):
+
+    def stamp() -> Stamp:
+        return Stamp(
+            directory / "conan.stamp",
+            conan.conanfile(project.manifest),
+            options.profile,
+            _conan_config(options.profile),
+            project.manifest.std,
+            tools.identity("conan"),
+            lock_path.read_text(encoding="utf-8") if lock_path.exists() else None,
+        )
+
+    if lock is not None and not options.refresh and stamp().is_current(graph_file, toolchain):
         return conan.read_graph(graph_file.read_text(encoding="utf-8"))
 
-    stamp.clear()
+    stamp().clear()
     tools.status("Resolving", "dependencies")
-    stdout = tools.run(
-        "conan",
-        "install",
-        str(conanfile),
-        f"--output-folder={output}",
-        "--build=missing",
-        "--format=json",
-        f"--profile:all={options.profile}",
-        f"--settings:host=build_type={options.build_type}",
-        f"--settings:host=compiler.cppstd={project.manifest.std}",
-        "--conf:host=tools.cmake.cmaketoolchain:generator=Ninja",
-        "--conf:host=tools.cmake.cmaketoolchain:user_presets=",
-        "-vverbose" if options.verbose else "-vwarning",
-        cwd=project.root,
-        capture=True,
+    arguments, new_lock = _lock_arguments(project, directory, lock, locked=options.locked)
+    stdout = _run_locked(
+        project,
+        options.locked,
+        ["install", str(conanfile), *_conan_arguments(project, options)],
+        [
+            *arguments,
+            f"--output-folder={output}",
+            "--build=missing",
+            "--format=json",
+            "--conf:host=tools.cmake.cmaketoolchain:generator=Ninja",
+            "--conf:host=tools.cmake.cmaketoolchain:user_presets=",
+        ],
     )
     graph = conan.read_graph(stdout)
     write_if_changed(graph_file, stdout)
-    stamp.save()
+    if not options.locked:
+        _save_lock(project, lock, new_lock)
+    # Saving the lock changes the inputs.
+    stamp().save()
     return graph
 
 

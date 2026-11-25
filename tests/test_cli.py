@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 
@@ -85,6 +86,7 @@ def test_export_builds_without_cxy(tmp_path):
         assert done.returncode == 0, done.stdout + done.stderr
         return done.stdout
 
+    assert (project / "conan.lock").is_file()
     (project / "cxy.toml").rename(tmp_path / "cxy.toml")
     generator = "tools.cmake.cmaketoolchain:generator=Ninja"
     settings = ("--build=missing", "-s", "compiler.cppstd=20", "-c", generator)
@@ -98,3 +100,69 @@ def test_export_builds_without_cxy(tmp_path):
     assert cxy("export", cwd=project).returncode == 1
     assert (project / "CMakeLists.txt").read_text() == "# edited\n"
     assert cxy("export", "--force", cwd=project).returncode == 0
+
+
+@pytest.mark.e2e
+def test_lock_follows_the_manifest(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    package = '[package]\nname = "demo"\nversion = "1"\n[dev-dependencies]\ncatch2 = "3.7.1"\n'
+
+    def use(text):
+        (project / "cxy.toml").write_text(package + text)
+
+    def locked():
+        conan = json.loads((project / "cxy.lock").read_text())["conan"]
+        return {ref.partition("#")[0] for ref in conan["requires"] + conan["build_requires"]}
+
+    def ok(*arguments):
+        result = cxy(*arguments, cwd=project)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stderr
+
+    spdlog = '[dependencies]\nspdlog = "1.14.1"\n'
+    use(spdlog)
+    assert cxy("build", "--locked", cwd=project).returncode == 1
+    assert cxy("lock", "--check", cwd=project).returncode == 1
+    ok("lock")
+    assert {"spdlog/1.14.1", "fmt/10.2.1"} <= locked()
+    ok("lock", "--check")
+    ok("build", "--locked")
+
+    # A lock made elsewhere may lack something that is needed here.
+    path = project / "cxy.lock"
+    complete = path.read_text()
+    data = json.loads(complete)
+    data["conan"]["requires"] = [r for r in data["conan"]["requires"] if "fmt" not in r]
+    path.write_text(json.dumps(data))
+    for command in ("lock", "--check"), ("build", "--locked"):
+        result = cxy(*command, cwd=project)
+        assert result.returncode == 1 and "not in lockfile" in result.stderr
+    ok("lock")
+    assert path.read_text() == complete
+
+    # Conan's own lockfile would ignore each of these changes to the override.
+    for version in ("10.2.0", "10.1.1"):
+        use(spdlog + f'[overrides]\nfmt = "{version}"\n')
+        assert cxy("build", "--locked", cwd=project).returncode == 1
+        ok("lock")
+        assert {ref for ref in locked() if ref.startswith("fmt/")} == {f"fmt/{version}"}
+    ok("lock", "--check")
+    use(spdlog)
+    ok("build")
+    assert {ref for ref in locked() if ref.startswith("fmt/")} == {"fmt/10.2.1"}
+
+    # A range keeps its locked version until it is upgraded.
+    use('[dependencies]\nfmt = "10.2.0"\n')
+    ok("lock")
+    use('[dependencies]\nfmt = "[>=10 <11]"\n')
+    ok("lock")
+    assert "fmt/10.2.0" in locked()
+    assert "Unchanged" in ok("lock")
+    assert "changed fmt 10.2.0 -> 10.2.1" in ok("lock", "--upgrade-package", "fmt")
+    ok("lock", "--upgrade")
+    assert not any(ref.startswith("spdlog") for ref in locked())
+    before = (project / "cxy.lock").read_text()
+    ok("build", "--release")
+    assert (project / "cxy.lock").read_text() == before
+    assert "Resolving" not in ok("build", "--release")

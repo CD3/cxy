@@ -9,21 +9,28 @@ from cxy.core.project import Project
 
 @Parameter(name="*")
 @dataclass(frozen=True)
-class CommonOptions:
+class ResolveOptions:
     release: Annotated[bool, Parameter(name=["--release", "-r"], negative="")] = False
     """Build with optimizations."""
 
     profile: str = "default"
     """Conan profile for the host and build contexts."""
 
-    refresh: Annotated[bool, Parameter(negative="")] = False
-    """Rerun Conan and CMake even if nothing has changed."""
-
     verbose: Annotated[bool, Parameter(name=["--verbose", "-v"], negative="")] = False
     """Show full tool output."""
 
     def to_core(self) -> pipeline.BuildOptions:
         return pipeline.BuildOptions(**asdict(self))
+
+
+@Parameter(name="*")
+@dataclass(frozen=True)
+class CommonOptions(ResolveOptions):
+    refresh: Annotated[bool, Parameter(negative="")] = False
+    """Rerun Conan and CMake even if nothing has changed."""
+
+    locked: Annotated[bool, Parameter(negative="")] = False
+    """Fail if cxy.lock is missing or out of date, instead of updating it."""
 
 
 @Parameter(name="*")

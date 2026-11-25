@@ -10,8 +10,8 @@ cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
-Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `lint`, `export`, `clean`.
-Planned: `add`, `remove`, `lock`.
+Commands: `new`, `init`, `build`, `run`, `test`, `fmt`, `lint`, `lock`, `export`, `clean`.
+Planned: `add`, `remove`.
 
 ## cxy.toml
 
@@ -51,6 +51,23 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - A source matching `test-patterns` beside the code it tests becomes its own test program.
 - Everything in `tests/` goes into one test program.
 - Layout directories may coincide, for example `lib = "src"` and `include = "src"`.
+
+## Locking
+
+`cxy.lock` records the exact version and revision of every dependency. Building creates and
+updates it, and keeps locked versions until you upgrade them. Commit it.
+
+```sh
+cxy lock                         # update it without building
+cxy lock --upgrade               # newest versions that cxy.toml allows
+cxy lock --upgrade-package fmt   # ...of one package
+cxy lock --check                 # fail if it is out of date
+cxy build --locked               # ...and likewise for other commands, for use in CI
+```
+
+Dependencies can differ between platforms, and a lock covers only those it was made on. Run
+`cxy lock` on each: it adds what is missing. Changing dependencies in `cxy.toml` removes entries
+that are not needed on the current platform.
 
 ## Testing
 
@@ -112,7 +129,7 @@ extensions. Be careful when checking a project that you do not trust.
 
 ## Sharing a project with people who do not use cxy
 
-`cxy export` writes `conanfile.py` and `CMakeLists.txt` to the project root. It will not replace
+`cxy export` writes `conanfile.py`, `CMakeLists.txt` and `conan.lock` to the project root. It will not replace
 files with different content unless given `--force`. To build the result:
 
 ```sh
@@ -121,6 +138,10 @@ cmake --preset conan-release
 cmake --build --preset conan-release
 ctest --preset conan-release
 ```
+
+Conan uses `conan.lock` automatically. On a platform it does not cover, add `--lockfile-partial`.
+After editing dependencies in an exported `conanfile.py`, delete `conan.lock` or make a new one:
+overrides recorded in it take precedence over the recipe's.
 
 Source files are listed explicitly, so export again after adding or removing any.
 
