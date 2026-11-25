@@ -51,7 +51,7 @@ def needed(project: Project, sources: Sources, test: str) -> tuple[str, ...]:
         seen.add(current)
         if current in candidates:
             found.add(current)
-        for header in _includes(project, current):
+        for header in included_files(project, current):
             pending.append(header)
             pending += _implementations(header.rpartition(".")[0], candidates)
     return tuple(sorted(found))
@@ -77,7 +77,14 @@ def _implementations(stem: str, candidates: Sequence[str]) -> list[str]:
     return [candidate for score, candidate in scored if score == best]
 
 
-def _includes(project: Project, file: str) -> list[str]:
+def include_names(project: Project, file: str) -> list[str]:
+    """Return what a file includes, as written."""
+    text = (project.root / file).read_text(encoding="utf-8", errors="replace")
+    return _INCLUDE.findall(text)
+
+
+def included_files(project: Project, file: str) -> list[str]:
+    """Return the project files that a file includes."""
     layout = project.manifest.layout
     directories = [
         str(PurePosixPath(file).parent),
@@ -85,9 +92,8 @@ def _includes(project: Project, file: str) -> list[str]:
         layout.lib,
         layout.src,
     ]
-    text = (project.root / file).read_text(encoding="utf-8", errors="replace")
     headers = []
-    for include in _INCLUDE.findall(text):
+    for include in include_names(project, file):
         for directory in directories:
             path = Path(os.path.normpath(project.root / directory / include))
             if path.is_relative_to(project.root) and path.is_file():

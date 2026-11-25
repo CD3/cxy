@@ -11,6 +11,7 @@ from cxy.core.errors import CxyError
 
 FILENAME = "cxy.toml"
 TOOLS = ("clang-format", "clang-tidy", "cmake-lint", "cppcheck", "gersemi", "ruff")
+TEST_FRAMEWORKS = ("catch2", "gtest")
 STANDARDS = (11, 14, 17, 20, 23, 26)
 RESERVED_NAMES = {"all", "clean", "help", "install", "package", "test"}
 _PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
@@ -53,6 +54,9 @@ class Manifest:
     dev_dependencies: tuple[Dependency, ...] = ()
     overrides: Mapping[str, str] = field(default_factory=dict)
     layout: Layout = field(default_factory=Layout)
+    test_framework: str | None = None
+    """The framework of tests that do not show which they use."""
+
     tools: Mapping[str, str] = field(default_factory=dict)
     """Pinned versions of formatters and linters."""
 
@@ -72,7 +76,7 @@ def parse(text: str) -> Manifest:
     data = tomllib.loads(text)
     _known(
         data,
-        {"package", "dependencies", "dev-dependencies", "overrides", "layout", "tools"},
+        {"package", "dependencies", "dev-dependencies", "overrides", "layout", "test", "tools"},
         "top level",
     )
     package = _table(data, "package")
@@ -106,6 +110,7 @@ def parse(text: str) -> Manifest:
         dev_dependencies=dev_dependencies,
         overrides=overrides,
         layout=_layout(_table(data, "layout")),
+        test_framework=_test_framework(_table(data, "test")),
         tools=_tools(_table(data, "tools")),
     )
 
@@ -180,6 +185,14 @@ def _layout(table: Mapping[str, Any]) -> Layout:
         if parent != "." and build.is_relative_to(parent):
             raise CxyError(f"layout.build cannot be inside layout.{key}")
     return layout
+
+
+def _test_framework(table: Mapping[str, Any]) -> str | None:
+    _known(table, {"framework"}, "[test]")
+    framework = table.get("framework")
+    if framework is not None and framework not in TEST_FRAMEWORKS:
+        raise CxyError(f"test.framework must be one of {', '.join(TEST_FRAMEWORKS)}")
+    return framework
 
 
 def _tools(table: Mapping[str, Any]) -> dict[str, str]:

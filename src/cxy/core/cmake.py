@@ -1,17 +1,15 @@
 """Generate CMakeLists.txt."""
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 
-from cxy.core import conan
+from cxy.core import conan, frameworks
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.manifest import Dependency, Manifest
 from cxy.core.project import Sources
+from cxy.core.testing import TestProgram
 
 MINIMUM_VERSION = "3.24"
-CATCH2 = "catch2"
 
 # The sources are outside the directory of the generated file, so CMake puts their full path
 # in the names of object files. On Windows that can make them too long for the compiler.
@@ -22,42 +20,12 @@ _SHORT_PATHS = [
 ]
 
 
-@dataclass(frozen=True)
-class TestProgram:
-    __test__ = False  # Not a pytest class.
-
-    target: str
-    sources: tuple[str, ...]
-    is_unit: bool
-
-    @property
-    def isolated_target(self) -> str:
-        return f"{self.target}_isolated"
-
-
-def test_programs(manifest: Manifest, sources: Sources) -> list[TestProgram]:
-    name = manifest.name
-    used = {name, f"{name}_lib", f"{name}_app", f"{name}_tests", *sources.unit_tests}
-    programs = []
-    for source in sources.unit_tests:
-        stem = re.sub(r"[^A-Za-z0-9_]", "_", source.rpartition(".")[0])
-        base = target = f"{name}_{stem}"
-        number = 2
-        while target in used:
-            target = f"{base}_{number}"
-            number += 1
-        used |= {target, f"{target}_isolated"}
-        programs.append(TestProgram(target, (source,), True))
-    if sources.tests:
-        programs.append(TestProgram(f"{name}_tests", sources.tests, False))
-    return programs
-
-
 def cmakelists(
     manifest: Manifest,
     sources: Sources,
     graph: Mapping[str, CMakeInfo],
     *,
+    programs: Sequence[TestProgram] = (),
     root: str | None = None,
     isolated: Mapping[str, Sequence[str]] | None = None,
 ) -> str:
@@ -139,19 +107,26 @@ def cmakelists(
         out += _link(exe, "PRIVATE", app_links)
         out.append("")
 
-    if programs := test_programs(manifest, sources):
-        others = [d for d in manifest.dev_dependencies if d.name != CATCH2]
-        test_links = [*_targets(others, graph), *_catch2_main(manifest, graph)]
-        body = [*_find_packages(manifest.dev_dependencies, graph), "include(Catch)"]
+    if programs:
+        dev = {d.name: d for d in manifest.dev_dependencies}
+        others = [d for d in dev.values() if d.name not in frameworks.ALL]
+
+        def test_links(program: TestProgram) -> list[str]:
+            framework = program.framework
+            return [*_targets(others, graph), *framework.links(dev[framework.package], graph)]
+
+        modules = dict.fromkeys(program.framework.cmake_module for program in programs)
+        body = _find_packages(dev.values(), graph)
+        body += [f"include({module})" for module in modules]
         for program in programs:
             target = program.target
             body += ["", *_call("add_executable", [target], map(path, program.sources))]
             body += _call("target_include_directories", [target, "PRIVATE", lib_dir, src_dir])
             body += _call("target_compile_features", [target, "PRIVATE", standard])
-            body += _link(target, "PRIVATE", [*app_links, *test_links])
+            body += _link(target, "PRIVATE", [*app_links, *test_links(program)])
             # Different programs may contain tests with the same name.
             body += _call(
-                "catch_discover_tests",
+                program.framework.discover_command,
                 [],
                 [target, "DISCOVERY_MODE PRE_TEST", f'TEST_PREFIX "{target}:"'],
             )
@@ -169,7 +144,7 @@ def cmakelists(
                 "target_include_directories", [target, "PRIVATE", include_dir, lib_dir, src_dir]
             )
             body += _call("target_compile_features", [target, "PRIVATE", standard])
-            body += _link(target, "PRIVATE", [*dependency_targets, *test_links])
+            body += _link(target, "PRIVATE", [*dependency_targets, *test_links(program)])
         out += ["if(BUILD_TESTING)", *(f"  {line}" if line else "" for line in body), "endif()"]
     return "\n".join(out).rstrip() + "\n"
 
@@ -204,12 +179,3 @@ def _targets(dependencies: Iterable[Dependency], graph: Mapping[str, CMakeInfo])
     for dependency in dependencies:
         targets += dependency.cmake_targets or (conan.resolve(dependency, graph).target,)
     return targets
-
-
-def _catch2_main(manifest: Manifest, graph: Mapping[str, CMakeInfo]) -> tuple[str, ...]:
-    for dependency in manifest.dev_dependencies:
-        if dependency.name == CATCH2:
-            return dependency.cmake_targets or ("Catch2::Catch2WithMain",)
-    raise CxyError(
-        "tests need a test framework: add catch2 (3.x) to [dev-dependencies] in cxy.toml"
-    )

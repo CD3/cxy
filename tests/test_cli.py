@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 
@@ -257,3 +258,137 @@ def test_unknown_options_are_errors(tmp_path):
     for command in ["lock"], ["lock", "--check"], ["build", "--locked"]:
         result = cxy(*command, cwd=project)
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+GTEST_PROJECT = """\
+[package]
+name = "demo"
+version = "1"
+[dev-dependencies]
+gtest = "1.17.0"
+"""
+GTEST_FILE = """\
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+struct Base {
+    virtual ~Base() = default;
+    virtual int get() = 0;
+};
+struct Mock : Base {
+    MOCK_METHOD(int, get, (), (override));
+};
+TEST(Mocks, work) {
+    Mock mock;
+    EXPECT_CALL(mock, get()).WillOnce(testing::Return(3));
+    EXPECT_EQ(mock.get(), 3);
+}
+"""
+CATCH2_FILE = """\
+#include <catch2/catch_test_macros.hpp>
+TEST_CASE("catch works") { REQUIRE(true); }
+"""
+
+
+def ctest(project):
+    (project / "cxy.toml").rename(project / "cxy.toml.off")
+    generator = "tools.cmake.cmaketoolchain:generator=Ninja"
+    settings = ("--build=missing", "-s", "compiler.cppstd=20", "-s", "build_type=Debug")
+    for command in (
+        ("conan", "install", ".", *settings, "-c", generator),
+        ("cmake", "--preset", "conan-debug"),
+        ("cmake", "--build", "--preset", "conan-debug"),
+        ("ctest", "--preset", "conan-debug"),
+    ):
+        done = subprocess.run(command, cwd=project, capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+    (project / "cxy.toml.off").rename(project / "cxy.toml")
+    return done.stdout
+
+
+@pytest.mark.e2e
+def test_gtest(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "cxy.toml").write_text(GTEST_PROJECT)
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    (project / "lib" / "greeting_test.cpp").write_text(
+        '#include "demo/greeting.hpp"\n#include <gtest/gtest.h>\n'
+        'TEST(Greeting, name) { EXPECT_EQ(demo::greet("a"), "Hello, a!"); }\n'
+    )
+
+    def test(*arguments):
+        return cxy("test", *arguments, cwd=project)
+
+    result = test()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("[  PASSED  ] 1 test.") == 2
+    assert test("--test", "greeting", "--isolated").returncode == 0
+    result = test("--filter", "Mocks")
+    assert result.returncode == 0 and "Mocks.work" in result.stdout
+    # gtest itself calls this a success.
+    for nothing in ("--filter", "nope"), ("--", "--gtest_filter=nope"):
+        result = test(*nothing)
+        assert result.returncode == 2 and "no tests matched" in result.stderr
+
+    assert cxy("export", cwd=project).returncode == 0
+    # The wording depends on the version of CTest.
+    assert re.search(r"100% tests passed.* out of 2\n", ctest(project))
+
+    # A test failure in either program must be noticed.
+    (project / "tests" / "greeting_test.cpp").write_text(
+        GTEST_FILE.replace("mock.get(), 3", "mock.get(), 4")
+    )
+    assert test().returncode == 1
+
+
+@pytest.mark.e2e
+def test_gtest_with_its_own_main(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "cxy.toml").write_text(GTEST_PROJECT)
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    (project / "tests" / "main.cpp").write_text(
+        "#include <gtest/gtest.h>\n#include <iostream>\n"
+        "int main(int argc, char** argv) {\n"
+        '    std::cout << "custom main" << std::endl;\n'
+        "    testing::InitGoogleTest(&argc, argv);\n"
+        "    return RUN_ALL_TESTS();\n}\n"
+    )
+    result = cxy("test", cwd=project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "custom main" in result.stdout and "[  PASSED  ] 1 test." in result.stdout
+
+
+@pytest.mark.e2e
+def test_both_frameworks(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "cxy.toml").write_text(GTEST_PROJECT + 'catch2 = "3.7.1"\n')
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    (project / "tests" / "new_test.cpp").write_text(CATCH2_FILE)
+    (project / "lib" / "unit_test.cpp").write_text(CATCH2_FILE)
+
+    def test(*arguments):
+        return cxy("test", *arguments, cwd=project)
+
+    result = test()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("All tests passed") == 2
+    assert result.stdout.count("[  PASSED  ] 1 test.") == 1
+    assert test("--filter", "work").returncode == 0
+    assert test("--filter", "nope").returncode == 2
+    result = test("--", "--help")
+    assert result.returncode == 1 and "different arguments" in result.stderr
+    assert test("--test", "demo_tests_gtest", "--", "--gtest_brief=1").returncode == 0
+
+    for name, old, new in ("greeting", "get(), 3", "get(), 4"), ("new", "true", "false"):
+        path = project / "tests" / f"{name}_test.cpp"
+        text = path.read_text()
+        path.write_text(text.replace(old, new))
+        assert test().returncode != 0
+        path.write_text(text)
+
+    assert cxy("export", cwd=project).returncode == 0
+    # The wording depends on the version of CTest.
+    assert re.search(r"100% tests passed.* out of 3\n", ctest(project))

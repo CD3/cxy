@@ -59,6 +59,7 @@ def run(*args: str, options: Options | None = None) -> int:
 def test(
     *args: str,
     tests: Annotated[tuple[str, ...], Parameter(name=["--test", "-t"], negative="")] = (),
+    name_filter: Annotated[str | None, Parameter(name=["--filter", "-f"])] = None,
     isolated: Annotated[bool, Parameter(negative="")] = False,
     options: Options | None = None,
 ) -> int:
@@ -67,13 +68,17 @@ def test(
     Parameters
     ----------
     args
-        Arguments for the test programs, such as a Catch2 filter. Put them after ``--``.
+        Arguments for the test programs, such as ``--help``. Put them after ``--``.
     tests
         Only build and run this test: a file, its name, or the name of the source it tests.
         May be repeated.
+    name_filter
+        Only run tests with this text in their names, whichever framework they use.
     isolated
         Compile only the sources that the chosen tests need, found by following their
         includes, so that code elsewhere may be broken.
     """
     core = (options or Options()).to_core()
-    return pipeline.test(Project.find(), core, args, names=tests, isolated=isolated)
+    return pipeline.test(
+        Project.find(), core, args, names=tests, isolated=isolated, name_filter=name_filter
+    )

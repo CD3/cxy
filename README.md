@@ -115,6 +115,17 @@ that are not needed on the current platform.
 cxy test                           # everything
 cxy test --test http               # only lib/net/http_test.cpp
 cxy test --test http --isolated    # ...without compiling unrelated sources
+cxy test --filter timeout          # only tests with this in their names
+```
+
+Catch2 and gtest are supported: add either to `[dev-dependencies]`, such as with
+`cxy add --dev gtest`. With both, each test uses the one that it includes, and `tests/` becomes
+one program for each. A single program cannot use both. If cxy cannot tell which one some tests
+use, say so:
+
+```toml
+[test]
+framework = "gtest"
 ```
 
 Test programs normally link the whole library. `--isolated` instead compiles only the sources

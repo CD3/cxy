@@ -20,6 +20,8 @@ class CMakeInfo:
 
     package: str
     target: str
+    components: frozenset[str] = frozenset()
+    """The targets of its components."""
 
 
 def conanfile(manifest: Manifest, *, standalone: bool = False) -> str:
@@ -98,6 +100,11 @@ def read_graph(output: str) -> dict[str, CMakeInfo]:
         result[name] = CMakeInfo(
             package=root.get("cmake_file_name", name),
             target=root.get("cmake_target_name", f"{name}::{name}"),
+            components=frozenset(
+                target
+                for key in cpp_info
+                if key != "root" and (target := _properties(cpp_info, key).get("cmake_target_name"))
+            ),
         )
     return result
 
@@ -106,7 +113,7 @@ def resolve(dependency: Dependency, graph: Mapping[str, CMakeInfo]) -> CMakeInfo
     info = graph.get(
         dependency.name, CMakeInfo(dependency.name, f"{dependency.name}::{dependency.name}")
     )
-    return CMakeInfo(dependency.cmake_package or info.package, info.target)
+    return CMakeInfo(dependency.cmake_package or info.package, info.target, info.components)
 
 
 def _properties(cpp_info: Mapping[str, Any], component: str) -> Mapping[str, Any]:

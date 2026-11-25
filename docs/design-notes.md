@@ -34,3 +34,8 @@
 - **Unknown options are errors.** Conan ignores them when they come from `default_options`. The graph
   omits options that a recipe removes for the current configuration, such as fmt's `shared` when
   `header_only` is set, so `conan inspect` confirms before anything is rejected.
+- **Test frameworks are detected, one per program.** The manifest shows which are available; if there
+  is more than one, the includes decide. Two frameworks in one program would give the linker two
+  main() functions, and it may silently choose one, so that the other's tests never run.
+- **cxy checks for itself that some gtest tests ran**, since most versions succeed when a filter
+  matches nothing.

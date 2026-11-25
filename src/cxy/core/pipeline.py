@@ -8,17 +8,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from cxy.core import closure, cmake, conan, formatting, tools
+from cxy.core import closure, cmake, conan, formatting, testing, tools
 from cxy.core import lock as locks
 from cxy.core import options as package_options
-from cxy.core.cmake import TestProgram
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.lock import Lock
 from cxy.core.project import Project, Sources
 from cxy.core.stamp import Stamp, digest, write_if_changed
+from cxy.core.testing import TestProgram
 
-NO_TESTS_RUN = 2  # Catch2's exit code, though some versions also use it for failures.
+NO_TESTS_RUN = 2
 CACHE_MARKER = "CACHEDIR.TAG"
 _CACHE_TEXT = "Signature: 8a477f597d28d172789f06886806bc55\n# Created by cxy.\n"
 
@@ -54,12 +54,19 @@ def test(
     arguments: Sequence[str],
     names: Sequence[str] = (),
     isolated: bool = False,
+    name_filter: str | None = None,
 ) -> int:
     sources = project.sources()
-    programs = cmake.test_programs(project.manifest, sources)
+    programs = testing.plan(project, sources)
     if not programs:
         raise CxyError("no tests found")
     programs = _select(project, programs, names)
+    used = {program.framework.package for program in programs}
+    if arguments and len(used) > 1:
+        raise CxyError(
+            f"these tests use {' and '.join(sorted(used))}, which take different arguments; "
+            "use --filter, or --test to choose tests that use one of them"
+        )
     needed = None
     if isolated:
         if not names:
@@ -68,16 +75,19 @@ def test(
             directory = project.manifest.layout.tests
             raise CxyError(f"--isolated only works for tests beside sources, not {directory}/")
         needed = {test: closure.needed(project, sources, test) for test in sources.unit_tests}
-    targets = [p.isolated_target if isolated else p.target for p in programs]
-    directory = _build(project, options, targets, needed)
+    targets = [(p, p.isolated_target if isolated else p.target) for p in programs]
+    directory = _build(project, options, [target for _, target in targets], needed)
 
     failed: list[tuple[str, int]] = []
     matched = False
-    for target in targets:
+    for program, target in targets:
+        framework = program.framework
         executable = _program(directory, target)
         tools.status("Running", target)
-        code = tools.execute(executable, arguments)
-        if code == NO_TESTS_RUN and _matches_nothing(executable, arguments):
+        chosen = framework.filter_arguments(name_filter) if name_filter else []
+        chosen += arguments
+        code = tools.execute(executable, chosen)
+        if framework.ran_nothing(executable, chosen, code):
             # A filter need not match something in every program.
             continue
         matched = True
@@ -97,6 +107,7 @@ def _select(
     if not names:
         return programs
     selected: list[TestProgram] = []
+    together = (project.manifest.layout.tests, f"{project.manifest.name}_tests")
     for name in names:
         path = Path(os.path.abspath(name))
         matches = [
@@ -110,18 +121,13 @@ def _select(
                     or path == project.root / program.sources[0]
                 )
             )
-            or (not program.is_unit and name == project.manifest.layout.tests)
+            or (not program.is_unit and name in together)
         ]
         if not matches:
             available = ", ".join(p.sources[0] if p.is_unit else p.target for p in programs)
             raise CxyError(f"no test called {name!r}; available: {available}")
         selected += [program for program in matches if program not in selected]
     return selected
-
-
-def _matches_nothing(executable: Path, arguments: Sequence[str]) -> bool:
-    """Tell "no tests ran" apart from a program that failed with the same exit code."""
-    return tools.execute(executable, [*arguments, "--allow-running-no-tests"], quiet=True) == 0
 
 
 def export(project: Project, options: BuildOptions, force: bool = False) -> None:
@@ -131,7 +137,9 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
     graph = _install(project, options, directory)
     files = {
         project.root / "conanfile.py": conan.conanfile(project.manifest, standalone=True),
-        project.root / "CMakeLists.txt": cmake.cmakelists(project.manifest, sources, graph),
+        project.root / "CMakeLists.txt": cmake.cmakelists(
+            project.manifest, sources, graph, programs=testing.plan(project, sources)
+        ),
     }
     if (lock := Lock.load(project.root / locks.FILENAME)) is not None:
         files[project.root / "conan.lock"] = lock.conan_text()
@@ -341,7 +349,8 @@ def clean(project: Project) -> None:
 
 
 def _prepare(project: Project, options: BuildOptions, sources: Sources) -> Path:
-    cmake.cmakelists(project.manifest, sources, {})  # Report project errors before running tools.
+    # Report project errors before running tools.
+    cmake.cmakelists(project.manifest, sources, {}, programs=testing.plan(project, sources))
     _create_build_dir(project)
     return project.build_dir / options.build_type.lower()
 
@@ -373,7 +382,14 @@ def configure(
     directory = _prepare(project, options, sources)
     graph = _install(project, options, directory)
     root = Path(os.path.relpath(project.root, project.build_dir)).as_posix()
-    text = cmake.cmakelists(project.manifest, sources, graph, root=root, isolated=isolated)
+    text = cmake.cmakelists(
+        project.manifest,
+        sources,
+        graph,
+        programs=testing.plan(project, sources),
+        root=root,
+        isolated=isolated,
+    )
     _configure(project, options, directory, text)
     return directory
 

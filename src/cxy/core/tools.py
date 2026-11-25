@@ -103,10 +103,9 @@ def run(name: str, *arguments: str, cwd: Path, capture: bool = False) -> str:
     return process.stdout or ""
 
 
-def execute(program: Path, arguments: Sequence[str], *, quiet: bool = False) -> int:
+def execute(program: Path, arguments: Sequence[str]) -> int:
     """Run a built program in the caller's directory and return its exit code."""
-    output = subprocess.DEVNULL if quiet else None
-    code = subprocess.run([str(program), *arguments], stdout=output, stderr=output).returncode
+    code = subprocess.run([str(program), *arguments]).returncode
     return 128 - code if code < 0 else code
 
 
