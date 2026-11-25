@@ -39,3 +39,5 @@
   main() functions, and it may silently choose one, so that the other's tests never run.
 - **cxy checks for itself that some gtest tests ran**, since most versions succeed when a filter
   matches nothing.
+- **Test frameworks are linked before other libraries.** Some of Boost's have a main() too, and the
+  linker uses the first that it finds.

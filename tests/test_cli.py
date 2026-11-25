@@ -392,3 +392,18 @@ def test_both_frameworks(tmp_path):
     assert cxy("export", cwd=project).returncode == 0
     # The wording depends on the version of CTest.
     assert re.search(r"100% tests passed.* out of 3\n", ctest(project))
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("compiled", [True, False])
+def test_main_in_a_dependency_does_not_replace_the_frameworks(tmp_path, compiled):
+    cxy("new", "demo", "--lib", cwd=tmp_path)
+    project = tmp_path / "demo"
+    if not compiled:
+        (project / "lib" / "greeting.cpp").unlink()
+    # As an ordinary dependency, Catch2 is just a library that has a main(), like some of Boost's.
+    (project / "cxy.toml").write_text(GTEST_PROJECT + '[dependencies]\ncatch2 = "3.7.1"\n')
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    result = cxy("test", cwd=project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[  PASSED  ] 1 test." in result.stdout

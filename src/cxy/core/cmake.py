@@ -111,9 +111,12 @@ def cmakelists(
         dev = {d.name: d for d in manifest.dev_dependencies}
         others = [d for d in dev.values() if d.name not in frameworks.ALL]
 
+        # These must come first. Other libraries may have a main() too, such as some of Boost's,
+        # and the linker uses the first that it finds. (CMake still puts the project's own
+        # library before these, but that has no reason to have one.)
         def test_links(program: TestProgram) -> list[str]:
             framework = program.framework
-            return [*_targets(others, graph), *framework.links(dev[framework.package], graph)]
+            return [*framework.links(dev[framework.package], graph), *_targets(others, graph)]
 
         modules = dict.fromkeys(program.framework.cmake_module for program in programs)
         body = _find_packages(dev.values(), graph)
@@ -123,7 +126,7 @@ def cmakelists(
             body += ["", *_call("add_executable", [target], map(path, program.sources))]
             body += _call("target_include_directories", [target, "PRIVATE", lib_dir, src_dir])
             body += _call("target_compile_features", [target, "PRIVATE", standard])
-            body += _link(target, "PRIVATE", [*app_links, *test_links(program)])
+            body += _link(target, "PRIVATE", [*test_links(program), *app_links])
             # Different programs may contain tests with the same name.
             body += _call(
                 program.framework.discover_command,
@@ -144,7 +147,7 @@ def cmakelists(
                 "target_include_directories", [target, "PRIVATE", include_dir, lib_dir, src_dir]
             )
             body += _call("target_compile_features", [target, "PRIVATE", standard])
-            body += _link(target, "PRIVATE", [*dependency_targets, *test_links(program)])
+            body += _link(target, "PRIVATE", [*test_links(program), *dependency_targets])
         out += ["if(BUILD_TESTING)", *(f"  {line}" if line else "" for line in body), "endif()"]
     return "\n".join(out).rstrip() + "\n"
 

@@ -114,8 +114,8 @@ def test_cmake_for_both():
     both = manifest()
     programs = plan_programs(both, sources, classes.__getitem__)
     text = cmake.cmakelists(both, sources, {}, programs=programs)
-    assert "target_link_libraries(app_tests_catch2 PRIVATE app_lib Catch2::Catch2WithMain)" in text
-    assert "target_link_libraries(app_tests_gtest PRIVATE app_lib GTest::gtest_main)" in text
+    assert "target_link_libraries(app_tests_catch2 PRIVATE Catch2::Catch2WithMain app_lib)" in text
+    assert "target_link_libraries(app_tests_gtest PRIVATE GTest::gtest_main app_lib)" in text
     assert "include(Catch)" in text and "include(GoogleTest)" in text
     assert "catch_discover_tests(\n" in text and "gtest_discover_tests(\n" in text
 

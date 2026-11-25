@@ -63,7 +63,7 @@ def test_cmake_app_objects_are_shared_with_tests():
     assert "add_library(app_app OBJECT" in text
     assert "target_link_libraries(app_lib PUBLIC fmt::fmt)" in text
     assert "target_link_libraries(app PRIVATE app_app app_lib)" in text
-    assert "target_link_libraries(app_tests PRIVATE app_app app_lib Catch2::Catch2WithMain)" in text
+    assert "target_link_libraries(app_tests PRIVATE Catch2::Catch2WithMain app_app app_lib)" in text
 
 
 def test_unit_tests_get_their_own_programs():
