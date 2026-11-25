@@ -36,7 +36,7 @@ jobs:
 
       - name: End-to-end tests
         if: ${{ !cancelled() && runner.os != 'Windows' }}
-        run: uv run poe test -m e2e
+        run: uv run poe test -m e2e --durations=0
 
       # Ninja needs the Visual C++ environment to find the compiler.
       - name: End-to-end tests (Visual C++)
@@ -45,4 +45,4 @@ jobs:
         run: |
           set "vswhere=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
           for /f "usebackq delims=" %%i in (`"%vswhere%" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
-          uv run poe test -m e2e
+          uv run poe test -m e2e --durations=0
