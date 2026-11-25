@@ -119,7 +119,7 @@ def _create(path: Path, name: str, lib_only: bool) -> None:
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(template.format(name=name, ns=namespace), encoding="utf-8")
+        target.write_text(template.format(name=name, ns=namespace), encoding="utf-8", newline="")
     _git_init(path)
     tools.status("Created", f"{'library' if lib_only else 'application'} {name!r}")
 

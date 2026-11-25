@@ -1,9 +1,10 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from cxy.core import formatting
+from cxy.core import formatting, tools
 from cxy.core.errors import CxyError
 from cxy.core.formatting import FORMATTERS
 from cxy.core.manifest import parse
@@ -105,7 +106,8 @@ def test_paths(tmp_path, monkeypatch):
 def test_git_workspace_skips_ignored_deleted_and_linked_files(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     write(tmp_path, {".gitignore": "out/\n", "out/x.cpp": "", "a.cpp": "", "gone.cpp": ""})
-    (tmp_path / "link.cpp").symlink_to("a.cpp")
+    if sys.platform != "win32":  # Links need special permission there.
+        (tmp_path / "link.cpp").symlink_to("a.cpp")
     subprocess.run(["git", "add", "gone.cpp"], cwd=tmp_path, check=True)
     (tmp_path / "gone.cpp").unlink()
     (tmp_path / "sub").mkdir()
@@ -142,3 +144,11 @@ def test_every_formatter_can_be_pinned():
 
 def test_unformatted_kinds():
     assert not any(f.handles(Path(n)) for f in FORMATTERS for n in ("setup.py", "a.c", "a.txt"))
+
+
+def test_relative_path_on_another_drive(monkeypatch):
+    def fail(_):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr("os.path.relpath", fail)
+    assert tools.relative(Path("a.cpp")) == "a.cpp"

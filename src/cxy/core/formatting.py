@@ -105,7 +105,7 @@ def fmt(
 
     changed = 0
     for result in sorted(results, key=lambda result: result.path):
-        label = os.path.relpath(result.path)
+        label = tools.relative(result.path)
         error = result.error
         if error is None and result.changed:
             if diff:

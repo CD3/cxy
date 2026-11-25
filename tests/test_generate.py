@@ -110,3 +110,11 @@ def test_stamp_and_write_if_changed(tmp_path):
     assert stamp.is_current(path)
     assert not stamp.is_current(tmp_path / "missing")
     assert not Stamp(tmp_path / "stamp", "changed").is_current()
+
+
+def test_writes_line_endings_unchanged(tmp_path):
+    path = tmp_path / "out"
+    for text in ("a\nb\n", "a\r\nb\r\n"):
+        assert write_if_changed(path, text)
+        assert path.read_bytes() == text.encode()
+        assert not write_if_changed(path, text)

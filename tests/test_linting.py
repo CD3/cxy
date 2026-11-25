@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from cxy.core.errors import CxyError
 from cxy.core.linting import find_database, lint, parse
 from cxy.core.workspace import Workspace
 
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell")
 needs_tidy = pytest.mark.skipif(not shutil.which("clang-tidy"), reason="needs clang-tidy")
 NULL = "int f() {\n  int* p = nullptr;\n  return *p;\n}\n"
 
@@ -53,12 +55,12 @@ def test_parse_clang_tidy():
     first, second = parse(linting._TIDY, output, Path("/"))
     assert (first.line, first.column, first.check) == (1, 2, "bugprone-x,-warnings-as-errors")
     assert "because" in first.detail
-    assert second.path == Path("/r/c.hpp") and second.severity == "error"
+    assert second.path == Path("/r/c.hpp").resolve() and second.severity == "error"
 
 
 def test_parse_others():
     (ruff,) = parse(linting._RUFF, "q.py:1:8: F401 [*] `os` unused\nFound 1 error.\n", Path("/r"))
-    assert (ruff.path, ruff.check) == (Path("/r/q.py"), "F401")
+    assert (ruff.path, ruff.check) == (Path("/r/q.py").resolve(), "F401")
     output = (
         "CMakeLists.txt\n====\nCMakeLists.txt:39: [C0301] Line too long\nx.cmake:1,2: [W01] y\n"
     )
@@ -132,6 +134,7 @@ def test_respects_header_filter_in_config(make):
     assert lint(make(files, ["a.cpp"])) == 0
 
 
+@posix_only
 def test_no_database_fails_but_checks_the_rest(make, capsys, monkeypatch):
     monkeypatch.setenv("CXY_CLANG_TIDY", "true")
     assert lint(make({"a.cpp": "", "conanfile.py": "import os\n"})) == 1
@@ -145,6 +148,7 @@ def test_missing_tool_fails(make, capsys, monkeypatch):
     assert "uv tool install clang-tidy" in capsys.readouterr().err
 
 
+@posix_only
 def test_crashing_tool_fails(make, capsys, monkeypatch, tmp_path):
     fake = tmp_path / "fake"
     fake.write_text('#!/bin/sh\n[ "$1" = --version ] && exit 0\necho boom >&2; exit 3\n')
@@ -154,6 +158,7 @@ def test_crashing_tool_fails(make, capsys, monkeypatch, tmp_path):
     assert "boom" in capsys.readouterr().err
 
 
+@posix_only
 def test_source_missing_from_database(make, capsys, monkeypatch):
     monkeypatch.setenv("CXY_CLANG_TIDY", "true")
     workspace = make({"a.cpp": "", "b.cpp": ""}, ["a.cpp"])

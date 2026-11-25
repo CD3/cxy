@@ -57,7 +57,7 @@ class Finding:
 
     def __str__(self) -> str:
         position = f"{self.line}:{self.column}" if self.column else str(self.line)
-        text = f"{os.path.relpath(self.path)}:{position}: "
+        text = f"{tools.relative(self.path)}:{position}: "
         text += f"{self.severity}: {self.message} [{self.check}]"
         return f"{text}\n{self.detail}" if self.detail else text
 
@@ -265,7 +265,7 @@ def _database(context: Context) -> Path:
             f"C++ files were not checked: no {DATABASE} found; configure the project with "
             "CMAKE_EXPORT_COMPILE_COMMANDS=ON, or use --build-dir"
         )
-    tools.status("Using", os.path.relpath(database))
+    tools.status("Using", tools.relative(database))
     return database
 
 
@@ -295,11 +295,11 @@ def _translation_units(context: Context, database: Path, report: Report) -> list
     named = {Path(os.path.abspath(name)).resolve() for name in context.paths}
     for path in missing:
         if path in named:
-            report.failures.append(f"{os.path.relpath(path)} is not in {DATABASE}")
+            report.failures.append(f"{tools.relative(path)} is not in {DATABASE}")
     if missing and not targets:
         report.failures.append(f"none of the C++ sources are in {database}")
     elif missing:
-        example = os.path.relpath(missing[0])
+        example = tools.relative(missing[0])
         tools.status(
             "Note",
             f"skipped {tools.count(len(missing))} not in {DATABASE}, such as {example}",
@@ -373,7 +373,7 @@ def _collect(
         # The last line says what went wrong, after any traceback.
         output = result.stderr.strip() or result.stdout.strip()
         detail = output.splitlines()[-1] if output else f"exit code {result.returncode}"
-    report.failures.append(f"{tool} could not check {os.path.relpath(subject)}: {detail}")
+    report.failures.append(f"{tool} could not check {tools.relative(subject)}: {detail}")
 
 
 def parse(pattern: re.Pattern[str], output: str, cwd: Path) -> list[Finding]:

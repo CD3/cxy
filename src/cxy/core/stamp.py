@@ -7,10 +7,10 @@ from pathlib import Path
 
 def write_if_changed(path: Path, text: str) -> bool:
     """Write a file only if its content differs, preserving its timestamp otherwise."""
-    if path.is_file() and path.read_text(encoding="utf-8", errors="replace") == text:
+    if path.is_file() and path.read_bytes() == text.encode():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
     return True
 
 

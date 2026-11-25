@@ -116,3 +116,11 @@ def status(verb: str, message: str) -> None:
 
 def count(number: int, noun: str = "file") -> str:
     return f"{number} {noun}{'' if number == 1 else 's'}"
+
+
+def relative(path: Path) -> str:
+    """Return a path to show the user, relative to the current directory if possible."""
+    try:
+        return os.path.relpath(path)
+    except ValueError:  # On Windows, it may be on another drive.
+        return str(path)
