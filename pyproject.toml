@@ -3,6 +3,8 @@ name = "cxy"
 version = "0.1.0"
 description = "A cargo-like project tool for C++, built on Conan, CMake and Ninja"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { email = "clifton.clark@gmail.com" }
 ]

@@ -174,3 +174,7 @@ uv run poe typecheck      # ty
 uv run poe test           # unit tests
 uv run poe test -m e2e    # real builds; set CONAN_HOME to isolate the Conan cache
 ```
+
+## License
+
+MIT. See `LICENSE`.
