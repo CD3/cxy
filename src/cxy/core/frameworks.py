@@ -1,5 +1,6 @@
 """What differs between test frameworks."""
 
+import os
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -64,11 +65,15 @@ class _GoogleTest(Framework):
         return ["--gtest_filter=*" + re.sub(r"[:-]", "?", text) + "*"]
 
     def ran_nothing(self, executable: Path, arguments: Sequence[str], code: int) -> bool:
-        # Most versions succeed when no tests match, so ask which do.
+        # Most versions succeed when no tests match, so ask which do. Listing tests writes the
+        # list to any output file, which would replace the results.
+        arguments = [a for a in arguments if not re.match("--?gtest_output", a)]
+        environment = {k: v for k, v in os.environ.items() if k != "GTEST_OUTPUT"}
         result = subprocess.run(
             [str(executable), *arguments, "--gtest_list_tests"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
+            env=environment,
             text=True,
             errors="replace",
         )

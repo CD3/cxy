@@ -442,3 +442,15 @@ def test_separate_programs(tmp_path):
     (project / "lib" / "broken.cpp").write_text("int broken() { return renamed(); }\n")
     assert cxy("test", "--test", "one", cwd=project).returncode == 1
     assert ok("--test", "one", "--isolated") == 1
+
+
+@pytest.mark.e2e
+def test_gtest_output_is_kept(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "cxy.toml").write_text(GTEST_PROJECT)
+    (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
+    output = tmp_path / "out.json"
+    assert cxy("test", "--", f"--gtest_output=json:{output}", cwd=project).returncode == 0
+    # A list of tests has no results.
+    assert json.loads(output.read_text())["failures"] == 0
