@@ -64,7 +64,7 @@ cxy remove fmt                       # from whichever section it is in
 ```
 
 These edit `cxy.toml`, keeping its comments, and update `cxy.lock`. If the dependencies cannot be
-resolved, nothing changes. Overriding a package that nothing depends on gives a warning.
+resolved, or a package does not have an option, nothing changes. Overriding a package that nothing depends on gives a warning.
 
 ## Locking
 

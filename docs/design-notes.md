@@ -31,3 +31,6 @@
   changes to `[overrides]`. cxy compares the settings, and discards recorded overrides when resolving.
 - **A lock is pruned only when dependencies change**, since Conan cannot tell unneeded entries from
   those for other platforms.
+- **Unknown options are errors.** Conan ignores them when they come from `default_options`. The graph
+  omits options that a recipe removes for the current configuration, such as fmt's `shared` when
+  `header_only` is set, so `conan inspect` confirms before anything is rejected.

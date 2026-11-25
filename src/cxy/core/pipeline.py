@@ -10,6 +10,7 @@ from pathlib import Path
 
 from cxy.core import closure, cmake, conan, formatting, tools
 from cxy.core import lock as locks
+from cxy.core import options as package_options
 from cxy.core.cmake import TestProgram
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
@@ -199,14 +200,20 @@ def lock(
             base = base.without_package(name)
             update.append(f"--update={name}")
     arguments, output = _lock_arguments(project, directory, base, locked=check)
-    # "lock create" accepts requirements that are not locked, whatever its arguments.
-    command = ["graph", "info"] if check else ["lock", "create"]
-    _run_locked(
-        project,
-        check,
-        [*command, str(conanfile), *_conan_arguments(project, options)],
-        [*arguments, *update],
-    )
+    arguments += update
+    # "lock create" accepts requirements that are not locked, whatever its arguments, so
+    # checking relies on this alone.
+    if check or _has_options(project):
+        _inspect_graph(project, options, conanfile, arguments, locked=check)
+    if not check:
+        tools.run(
+            "conan",
+            *("lock", "create", str(conanfile)),
+            *_conan_arguments(project, options),
+            *arguments,
+            cwd=project.root,
+            capture=True,
+        )
     if check:
         tools.status("Checked", f"{locks.FILENAME} is up to date")
     elif not _save_lock(project, current, output):
@@ -271,6 +278,30 @@ def _run_locked(
             f"{error}; if a requirement is not in {locks.FILENAME}, run 'cxy lock' with this "
             "platform and profile"
         ) from error
+
+
+def _has_options(project: Project) -> bool:
+    manifest = project.manifest
+    return any(d.options for d in (*manifest.dependencies, *manifest.dev_dependencies))
+
+
+def _inspect_graph(
+    project: Project,
+    options: BuildOptions,
+    conanfile: Path,
+    arguments: Sequence[str],
+    *,
+    locked: bool,
+) -> None:
+    """Resolve dependencies without installing them, and check the options given to them."""
+    graph = _run_locked(
+        project,
+        locked,
+        ["graph", "info", str(conanfile), *_conan_arguments(project, options)],
+        # Nothing is built, but this avoids warnings about binaries that do not exist yet.
+        [*arguments, "--build=missing", "--format=json"],
+    )
+    package_options.check(project.manifest, graph, project.root)
 
 
 def _write_conanfile(project: Project) -> Path:
@@ -384,6 +415,9 @@ def _install(project: Project, options: BuildOptions, directory: Path) -> dict[s
     stamp().clear()
     tools.status("Resolving", "dependencies")
     arguments, new_lock = _lock_arguments(project, directory, lock, locked=options.locked)
+    if _has_options(project):
+        # Before installing, which may spend a long time building the wrong thing.
+        _inspect_graph(project, options, conanfile, arguments, locked=options.locked)
     stdout = _run_locked(
         project,
         options.locked,

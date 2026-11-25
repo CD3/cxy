@@ -230,3 +230,30 @@ def test_add_and_remove_override(tmp_path):
     for bad in ("spdlog@1.15.0",), ("--dev", "fmt@10.2.0"), ("fmt@10.2.0", "-o", "shared=true"):
         assert cxy("add", "--override", *bad, cwd=project).returncode == 1
     assert (project / "cxy.toml").read_text() == before
+
+
+@pytest.mark.e2e
+def test_unknown_options_are_errors(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    toml = project / "cxy.toml"
+    original = toml.read_text()
+
+    result = cxy("add", "zlib@1.3.1", "-o", "shard=true", cwd=project)
+    assert result.returncode == 1 and "did you mean 'shared'?" in result.stderr
+    assert toml.read_text() == original
+
+    def use(options):
+        entry = f'fmt = {{ version = "10.2.1", options = {{ {options} }} }}'
+        toml.write_text(original.replace("[dependencies]\n", f"[dependencies]\n{entry}\n"))
+
+    use("header_onyl = true")
+    for command in ["build"], ["lock"], ["export"]:
+        result = cxy(*command, cwd=project)
+        assert result.returncode == 1 and "did you mean 'header_only'?" in result.stderr
+
+    # header_only makes the recipe remove "shared", which is still a valid name.
+    use("header_only = true, shared = true")
+    for command in ["lock"], ["lock", "--check"], ["build", "--locked"]:
+        result = cxy(*command, cwd=project)
+        assert result.returncode == 0, result.stdout + result.stderr
