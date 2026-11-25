@@ -201,3 +201,32 @@ def test_add_and_remove(tmp_path):
     ok("add", "zlib")
     assert toml.read_text().startswith("# keep me\n")
     ok("build", "--locked")
+
+
+@pytest.mark.e2e
+def test_add_and_remove_override(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    (project / "src" / "main.cpp").write_text(
+        "#include <fmt/format.h>\n#include <iostream>\nint main() { std::cout << FMT_VERSION; }\n"
+    )
+
+    def ok(*arguments):
+        result = cxy(*arguments, cwd=project)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result
+
+    ok("add", "spdlog@1.14.1")
+    assert ok("run").stdout.endswith("100201")
+    for version, number in ("10.2.0", "100200"), ("10.1.1", "100101"):
+        assert "Warning" not in ok("add", "--override", f"fmt@{version}").stderr
+        assert ok("run").stdout.endswith(number)
+    ok("build", "--locked")
+    assert "from overrides" in ok("remove", "fmt").stderr
+    assert ok("run").stdout.endswith("100201")
+    assert "nothing depends on zlib" in ok("add", "--override", "zlib@1.3.1").stderr
+
+    before = (project / "cxy.toml").read_text()
+    for bad in ("spdlog@1.15.0",), ("--dev", "fmt@10.2.0"), ("fmt@10.2.0", "-o", "shared=true"):
+        assert cxy("add", "--override", *bad, cwd=project).returncode == 1
+    assert (project / "cxy.toml").read_text() == before

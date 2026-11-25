@@ -70,7 +70,9 @@ def test_crlf_is_kept():
     [
         ("dependencies", "catch2", "already in dev-dependencies"),
         ("dev-dependencies", "fmt", "already in dependencies"),
-        ("dependencies", "zlib", "overrides"),
+        ("dependencies", "zlib", "--override"),
+        ("overrides", "fmt", "--force-version"),
+        ("overrides", "catch2", "--force-version"),
     ],
 )
 def test_add_errors(section, name, message):
@@ -78,12 +80,19 @@ def test_add_errors(section, name, message):
         add_to(TEXT, section, Request(name, "1"))
 
 
+def test_overrides():
+    assert add_to(TEXT, "overrides", Request("zlib", "1.4")) == replace('"1.3"', '"1.4"')
+    assert add_to(TEXT, "overrides", Request("bzip2", "1")) == TEXT + 'bzip2 = "1"\n'
+    for request in Request("bzip2", "1", {"shared": True}), Request("bzip2", "1", force=True):
+        with pytest.raises(CxyError, match="only a version"):
+            add_to(TEXT, "overrides", request)
+
+
 def test_remove():
     assert remove_from(TEXT, "fmt") == replace('fmt = "10.0.0"  # formatting\n', "")
     assert remove_from(TEXT, "catch2") == replace('catch2 = "3.7.1"\n', "")
-    with pytest.raises(CxyError, match="in \\[overrides\\]"):
-        remove_from(TEXT, "zlib")
-    with pytest.raises(CxyError, match="not a dependency"):
+    assert remove_from(TEXT, "zlib") == replace('zlib = "1.3"\n', "")
+    with pytest.raises(CxyError, match="nope is not in"):
         remove_from(TEXT, "nope")
 
 

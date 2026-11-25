@@ -10,14 +10,19 @@ from typing import Any
 
 import tomlkit
 
+from cxy.core import lock as locks
 from cxy.core import manifest as manifests
 from cxy.core import pipeline, tools
 from cxy.core.errors import CxyError
+from cxy.core.lock import Lock
 from cxy.core.manifest import OptionValue
 from cxy.core.pipeline import BuildOptions
 from cxy.core.project import Project
 
-SECTIONS = ("dependencies", "dev-dependencies")
+DEPENDENCIES = "dependencies"
+DEV_DEPENDENCIES = "dev-dependencies"
+OVERRIDES = "overrides"
+SECTIONS = (DEPENDENCIES, DEV_DEPENDENCIES, OVERRIDES)
 
 # Ordinary releases, as opposed to pre-releases, variants and dated snapshots.
 _RELEASE = re.compile(r"\d+(\.\d+)*[a-z]?")
@@ -46,9 +51,11 @@ def parse_request(text: str, options: Sequence[str] = (), *, force: bool = False
 
 
 def add(
-    project: Project, requests: Sequence[Request], options: BuildOptions, *, dev: bool = False
+    project: Project,
+    requests: Sequence[Request],
+    options: BuildOptions,
+    section: str = DEPENDENCIES,
 ) -> None:
-    section = SECTIONS[dev]
     resolved = []
     for request in requests:
         manifests.check_dependency_name(request.name)
@@ -60,28 +67,34 @@ def add(
     _apply(project, text, options)
     for request in resolved:
         tools.status("Added", f"{request.name} {request.version} to {section}")
+    if section == OVERRIDES:
+        _warn_if_unused(project, [request.name for request in resolved])
 
 
 def remove(project: Project, names: Sequence[str], options: BuildOptions) -> None:
     text = _read(project)
+    removed = []
     for name in names:
+        section = find_section(tomllib.loads(text), name)
         text = remove_from(text, name)
+        removed.append((name, section))
     _apply(project, text, options)
-    for name in names:
-        tools.status("Removed", name)
+    for name, section in removed:
+        tools.status("Removed", f"{name} from {section}")
+
+
+def find_section(data: Mapping[str, Any], name: str) -> str | None:
+    return next((section for section in SECTIONS if name in data.get(section, {})), None)
 
 
 def add_to(text: str, section: str, request: Request) -> str:
     """Return the manifest text with a dependency added or updated."""
     data = tomllib.loads(text)
-    other = SECTIONS[section == SECTIONS[0]]
-    if request.name in data.get(other, {}):
-        raise CxyError(f"{request.name} is already in {other}; remove it first")
-    if request.name in data.get("overrides", {}):
-        raise CxyError(
-            f"{request.name} is in [overrides], which is only for indirect dependencies; "
-            "remove it there first"
-        )
+    current = find_section(data, request.name)
+    if current not in (None, section):
+        raise CxyError(_wrong_section(request.name, current, section))
+    if section == OVERRIDES and (request.options or request.force):
+        raise CxyError("an override is only a version; it cannot have options or be forced")
     old = data.get(section, {}).get(request.name)
     table: dict[str, Any] = copy.deepcopy(old) if isinstance(old, dict) else {}
     table["version"] = request.version
@@ -107,13 +120,35 @@ def add_to(text: str, section: str, request: Request) -> str:
     return _checked(document, expected)
 
 
+def _wrong_section(name: str, current: str | None, wanted: str) -> str:
+    if wanted == OVERRIDES:
+        return (
+            f"{name} is already in {current}, so it cannot be overridden; "
+            "add it there with --force-version instead"
+        )
+    if current == OVERRIDES:
+        return (
+            f"{name} is in {OVERRIDES}, which is only for indirect dependencies; "
+            "remove it first, or use --override to change its version"
+        )
+    return f"{name} is already in {current}; remove it first"
+
+
+def _warn_if_unused(project: Project, names: Sequence[str]) -> None:
+    """Point out overrides of packages that nothing depends on, which may be misspelled."""
+    lock = Lock.load(project.root / locks.FILENAME)
+    packages = lock.packages() if lock else {}
+    for name in names:
+        if name not in packages:
+            tools.status("Warning", f"nothing depends on {name}, so overriding it has no effect")
+
+
 def remove_from(text: str, name: str) -> str:
     """Return the manifest text with a dependency removed."""
     data = tomllib.loads(text)
-    section = next((s for s in SECTIONS if name in data.get(s, {})), None)
+    section = find_section(data, name)
     if section is None:
-        hint = "; it is in [overrides]" if name in data.get("overrides", {}) else ""
-        raise CxyError(f"{name} is not a dependency{hint}")
+        raise CxyError(f"{name} is not in {', '.join(SECTIONS[:-1])} or {SECTIONS[-1]}")
     expected = copy.deepcopy(data)
     del expected[section][name]
     document: Any = tomlkit.parse(text)

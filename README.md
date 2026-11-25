@@ -59,11 +59,12 @@ cxy add fmt@11.0.2 spdlog            # fmt/11.0.2 works too
 cxy add --dev trompeloeil            # only for tests
 cxy add boost -o shared=false        # with a Conan option
 cxy add fmt@10.2.0 --force-version   # win a version conflict
-cxy remove fmt
+cxy add --override zlib@1.3.1        # version of an indirect dependency
+cxy remove fmt                       # from whichever section it is in
 ```
 
 These edit `cxy.toml`, keeping its comments, and update `cxy.lock`. If the dependencies cannot be
-resolved, nothing changes. `[overrides]` is edited by hand.
+resolved, nothing changes. Overriding a package that nothing depends on gives a warning.
 
 ## Locking
 

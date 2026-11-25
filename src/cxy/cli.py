@@ -32,7 +32,9 @@ app.command(
 )
 app.command("cxy.commands.dependencies:add", name="add", help="Add dependencies to cxy.toml.")
 app.command(
-    "cxy.commands.dependencies:remove", name="remove", help="Remove dependencies from cxy.toml."
+    "cxy.commands.dependencies:remove",
+    name="remove",
+    help="Remove dependencies and overrides from cxy.toml.",
 )
 app.command("cxy.commands.lock:lock", name="lock", help="Record exact dependency versions.")
 app.command("cxy.commands.clean:clean", name="clean", help="Delete the build directory.")
