@@ -515,7 +515,7 @@ def test_ctest(tmp_path):
     (project / "cxy.toml").write_text(GTEST_PROJECT + 'catch2 = "3.7.1"\n')
     (project / "tests" / "greeting_test.cpp").write_text(GTEST_FILE)
     (project / "lib" / "unit_test.cpp").write_text(
-        CATCH2_FILE + 'TEST_CASE("crash") { if (std::getenv("DEMO_CRASH")) std::abort(); }\n'
+        CATCH2_FILE + 'TEST_CASE("crash") { if (std::getenv("DEMO_CRASH")) std::_Exit(3); }\n'
         'TEST_CASE("after") {}\n'
     )
     text = (project / "lib" / "unit_test.cpp").read_text()
@@ -543,7 +543,8 @@ def test_ctest(tmp_path):
     result = test("--test", "unit", "--isolated")
     assert result.returncode == 1 and "cannot be combined" in result.stderr
 
-    # A crash loses only that test, which can then be run again.
+    # A crash loses only that test, which can then be run again. Not abort(), which shows a
+    # dialog in a Windows debug build, so the test would wait for its timeout.
     environment = {**os.environ, "DEMO_CRASH": "1"}
     result = test(env=environment)
     assert result.returncode != 0
