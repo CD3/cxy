@@ -195,9 +195,17 @@ def test_what_conan_does_not_provide(tmp_path):
         "cpp_info": {"root": {"system_libs": ["m"], "defines": ["FMT_SHARED"]}},
     }
     provided = porting.conan_provides(json.dumps(nodes))
-    for item in ("-lm", "-DFMT_SHARED", f"{package}/lib/libfmt.a", f"-L{package}/lib"):
+    for item in (
+        "-lm",
+        "m.lib",
+        "-DFMT_SHARED",
+        f"{package}/lib/libfmt.a",
+        f"-L{package}/lib",
+        f"-LIBPATH:{package}/lib",
+        f"/LIBPATH:{package}/lib",
+    ):
         assert provided.provides(item), item
-    for item in ("-fopenmp", "-lgomp", "/usr/lib/libgomp.so", f"-L{tmp_path}"):
+    for item in ("-fopenmp", "-lgomp", "gomp.lib", "/usr/lib/libgomp.so", f"-L{tmp_path}"):
         assert not provided.provides(item), item
 
     write(tmp_path, {"lib/a.cpp": "", "src/main.cpp": ""})

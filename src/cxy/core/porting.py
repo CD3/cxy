@@ -117,11 +117,13 @@ class Provided:
             return text.split()[-1] in self.system_libs
         if text.startswith("-l"):
             return text[2:] in self.system_libs
-        for prefix in ("-L", "-Wl,-rpath,", "-Wl,-rpath-link,", "/LIBPATH:"):
-            if text.startswith(prefix):
+        if text.lower().endswith(".lib") and not Path(text).is_absolute():
+            return text[:-4] in self.system_libs
+        for prefix in ("/LIBPATH:", "-LIBPATH:", "-Wl,-rpath,", "-Wl,-rpath-link,", "-L"):
+            if text.upper().startswith(prefix.upper()):
                 return all(self.provides(part) for part in text[len(prefix) :].split(os.pathsep))
         path = Path(text)
-        return path.is_absolute() and any(path.is_relative_to(f) for f in self.folders)
+        return path.is_absolute() and any(path.resolve().is_relative_to(f) for f in self.folders)
 
 
 def conan_provides(install_output: str) -> Provided:
