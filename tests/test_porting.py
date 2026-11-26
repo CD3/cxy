@@ -156,8 +156,7 @@ def test_what_cxy_cannot_build(tmp_path):
     write(
         tmp_path,
         {
-            "lib/a.cpp": '#include "a.hpp"\n',
-            "lib/a.hpp": "#ifdef FAST\n#endif\n",
+            "lib/a.cpp": "",
             "lib/b.cpp": "",
             "lib/unused.cpp": "",
             "src/app.cpp": "",
@@ -166,8 +165,8 @@ def test_what_cxy_cannot_build(tmp_path):
     _, findings = propose(
         tmp_path,
         [
-            Target("a", "STATIC_LIBRARY", sources=("lib/a.cpp",), definitions=("FAST", "SLOW=1")),
-            Target("b", "STATIC_LIBRARY", sources=("lib/b.cpp",), flags=("-ffast-math",)),
+            Target("a", "STATIC_LIBRARY", sources=("lib/a.cpp",)),
+            Target("b", "STATIC_LIBRARY", sources=("lib/b.cpp",)),
             Target("app", "EXECUTABLE", sources=("src/app.cpp",)),
             Target("vendored", "STATIC_LIBRARY", foreign=("/elsewhere/x.cpp",)),
         ],
@@ -177,10 +176,7 @@ def test_what_cxy_cannot_build(tmp_path):
     assert "vendored is built from files that are generated or outside" in problems
     assert "builds 2 libraries (a, b)" in problems
     assert "main() in a file named main.cpp" in problems
-    assert "a is compiled with -DFAST" in problems
-    assert "-ffast-math" in problems
     assert "would also compile" in problems and "lib/unused.cpp" in problems
-    assert any("-DSLOW=1" in w and "nothing they compile uses it" in w for w in findings.warnings)
 
 
 def test_what_conan_does_not_provide(tmp_path):
@@ -278,6 +274,7 @@ target_compile_definitions(mixed PRIVATE GREETING="hi")
 include(CTest)
 add_executable(mixed_tests tests/greeting_test.cpp)
 target_link_libraries(mixed_tests PRIVATE mixed_core Catch2::Catch2WithMain)
+target_compile_definitions(mixed_tests PRIVATE EXPECTED="hi!")
 add_test(NAME mixed_tests COMMAND mixed_tests)
 """
 
@@ -321,20 +318,21 @@ def test_port(tmp_path):
             "src/main.cpp": '#include <cstdio>\n#include "greeting.hpp"\n'
             "int main() { std::puts(GREETING); std::puts(greet().c_str()); }\n",
             "tests/greeting_test.cpp": "#include <catch2/catch_test_macros.hpp>\n"
-            '#include "greeting.hpp"\nTEST_CASE("greet") { REQUIRE(greet() == "hi!"); }\n',
+            '#include "greeting.hpp"\nTEST_CASE("greet") { REQUIRE(greet() == EXPECTED); }\n',
         },
     )
     before = snapshot(tmp_path)
 
-    # main.cpp needs a definition that cxy cannot set.
+    # The test needs a definition of its own, which cxy cannot set.
     result = cxy("port", cwd=tmp_path)
     assert result.returncode == 1, result.stderr
-    assert '-DGREETING="hi"' in result.stderr
+    assert '-DEXPECTED="hi!"' in result.stderr
     assert not (tmp_path / "cxy.toml").exists()
     assert snapshot(tmp_path) == before
 
-    (tmp_path / "src" / "main.cpp").write_text(
-        '#include <cstdio>\n#include "greeting.hpp"\nint main() { std::puts(greet().c_str()); }\n'
+    (tmp_path / "tests" / "greeting_test.cpp").write_text(
+        "#include <catch2/catch_test_macros.hpp>\n"
+        '#include "greeting.hpp"\nTEST_CASE("greet") { REQUIRE(greet() == "hi!"); }\n'
     )
     before = snapshot(tmp_path)
     result = cxy("port", cwd=tmp_path)
@@ -345,8 +343,89 @@ def test_port(tmp_path):
     assert manifest.layout.lib == manifest.layout.include == manifest.layout.src == "src"
     assert manifest.dependencies[0].options == {"shared": False}
     assert [d.name for d in manifest.dev_dependencies] == ["catch2"]
+    assert manifest.program.defines == ('GREETING="hi"',)
+
+    result = cxy("run", cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-2:] == ["hi", "hi!"]
 
     result = cxy("test", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "All tests passed" in result.stdout
     assert cxy("port", cwd=tmp_path).returncode == 1  # cxy.toml exists.
+
+
+def test_settings_are_carried(tmp_path):
+    write(
+        tmp_path,
+        {
+            "include/a.hpp": "#ifdef API\n#endif\n",
+            "lib/a.cpp": '#include "a.hpp"\n',
+            "src/main.cpp": "",
+            "src/cli.cpp": "",
+            "tests/a_test.cpp": GTEST + "#ifdef ONLY_TESTS\n#endif\n",
+        },
+    )
+    common = ("EVERYWHERE", "-Wall")
+    manifest, findings = propose(
+        tmp_path,
+        [
+            Target(
+                "a",
+                "SHARED_LIBRARY",
+                sources=("lib/a.cpp",),
+                includes=("include",),
+                definitions=(common[0], "API=1", "BUILDING_A"),
+                flags=(common[1], "-O2"),
+            ),
+            Target(
+                "demo",
+                "EXECUTABLE",
+                "demo",
+                ("src/main.cpp", "src/cli.cpp"),
+                definitions=(common[0], "API=1", "APP", "UNUSED"),
+                flags=(common[1],),
+            ),
+            Target(
+                "tests",
+                "EXECUTABLE",
+                sources=("tests/a_test.cpp",),
+                definitions=(common[0], "API=1", "APP", "ONLY_TESTS"),
+                flags=(common[1], "-g3"),
+                link_flags=("-Wl,--as-needed",),
+            ),
+        ],
+    )
+    # Definitions on every target can go in either; cxy passes the library's on to the others.
+    assert manifest.build.defines == ("EVERYWHERE", "API=1")
+    assert manifest.build.flags == ("-Wall",)
+    assert manifest.library.shared
+    assert manifest.library.defines == ("BUILDING_A",) and manifest.library.flags == ("-O2",)
+    assert manifest.program.defines == ("APP", "UNUSED")
+    problems = "\n".join(findings.problems)
+    assert "tests is compiled with -DONLY_TESTS, which cxy cannot set" in problems
+    assert "tests is compiled with options cxy cannot set for it: -g3" in problems
+    assert "tests is linked with options cxy cannot set: -Wl,--as-needed" in problems
+    assert len(findings.problems) == 3
+
+
+def test_settings_cxy_would_add(tmp_path):
+    write(
+        tmp_path,
+        {
+            "include/a.hpp": "",
+            "lib/a.cpp": '#include "a.hpp"\n',
+            "src/main.cpp": "#ifdef FAST\n#endif\n",
+        },
+    )
+    _, findings = propose(
+        tmp_path,
+        [
+            Target("a", "STATIC_LIBRARY", sources=("lib/a.cpp",), definitions=("FAST", "F(x)=x")),
+            Target("demo", "EXECUTABLE", "demo", ("src/main.cpp",)),
+        ],
+    )
+    assert findings.problems == [
+        "cxy cannot set -DF(x)=x, which is not NAME or NAME=value",
+        "cxy would also compile demo with -DFAST, which it uses",
+    ]

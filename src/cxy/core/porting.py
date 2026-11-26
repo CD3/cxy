@@ -9,6 +9,7 @@ import ast
 import json
 import os
 import re
+import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -35,13 +36,8 @@ _DEFINITION_COMMANDS = {
     "set_target_properties",
     "target_compile_definitions",
 }
-_OPTION_COMMANDS = {
-    "add_compile_options",
-    "add_link_options",
-    "set_property",
-    "target_compile_options",
-    "target_link_options",
-}
+_OPTION_COMMANDS = {"add_compile_options", "set_property", "target_compile_options"}
+_LINK_OPTION_COMMANDS = {"add_link_options", "set_property", "target_link_options"}
 _STANDARD_COMMANDS = {"set_property", "set_target_properties", "target_compile_features"}
 _CMAKE_OPTIONS_IGNORED = {"BUILD_TESTING"}
 
@@ -91,7 +87,10 @@ class Target:
     """Preprocessor definitions set by the project, not by its dependencies."""
 
     flags: tuple[str, ...] = ()
-    """Compiler and linker options set by the project."""
+    """Compiler options set by the project."""
+
+    link_flags: tuple[str, ...] = ()
+    """Linker options set by the project."""
 
     inherited: tuple[str, ...] = ()
     """Definitions, options and libraries from the targets it links, such as packages."""
@@ -206,6 +205,8 @@ def _install(root: Path, recipe: Path, output: Path, options: BuildOptions) -> s
     placeholder = Project(root, Manifest(name="port", version="0"))
     pipeline.ensure_profile(placeholder, options)
     tools.status("Resolving", f"the dependencies in {recipe.name}")
+    # Files from an earlier install with other settings would also be found by CMake.
+    shutil.rmtree(output, ignore_errors=True)
     return tools.run(
         "conan",
         "install",
@@ -515,6 +516,7 @@ def _target(data: Mapping[str, Any], project_path: Any, built: Any) -> Target:
     includes: dict[str, None] = {}
     definitions: dict[str, None] = {}
     flags: dict[str, None] = {}
+    link_flags: dict[str, None] = {}
     inherited: dict[str, None] = {}
     standard = None
     explicit = False
@@ -546,8 +548,8 @@ def _target(data: Mapping[str, Any], project_path: Any, built: Any) -> Target:
         text = fragment["fragment"].strip()
         if fragment.get("backtrace") is None or not text:
             continue
-        if own(fragment["backtrace"], _OPTION_COMMANDS):
-            flags[text] = None
+        if own(fragment["backtrace"], _LINK_OPTION_COMMANDS):
+            link_flags[text] = None
         elif fragment.get("role") != "libraries" or not built(text.strip('"')):
             inherited[text] = None
     return Target(
@@ -560,6 +562,7 @@ def _target(data: Mapping[str, Any], project_path: Any, built: Any) -> Target:
         includes=tuple(includes),
         definitions=tuple(definitions),
         flags=tuple(flags),
+        link_flags=tuple(link_flags),
         inherited=tuple(inherited),
         standard=standard,
         standard_is_explicit=explicit,
@@ -620,7 +623,7 @@ def propose(
     programs = [t for t in targets if t.kind == "EXECUTABLE" and t not in tests]
     library = _only(libraries, "libraries", "one library", findings)
     program = _only(programs, "programs", "one application", findings)
-    if library is not None and library.kind != "STATIC_LIBRARY":
+    if library is not None and library.kind not in ("STATIC_LIBRARY", "SHARED_LIBRARY"):
         findings.warnings.append(f"cxy builds {library.name} as a static library")
 
     layout = _layout(library, program, tests, targets, default.manifest.layout, findings)
@@ -651,9 +654,15 @@ def propose(
     if separate:
         document["test"] = {"separate": True}
     _check_frameworks(project, sources, document, findings)
-    _check_settings(project, [t for t in targets if t.sources], findings)
+    objects = any(found.sources for found in sources.programs)
+    _carry_settings(project, library, program, tests, objects, document, findings)
     _check_inherited([t for t in targets if t.sources], provided or Provided(), findings)
-    return tomlkit.dumps(document)
+    text = tomlkit.dumps(document)
+    try:
+        manifests.parse(text)
+    except CxyError as error:
+        raise CxyError(f"the proposed {manifests.FILENAME} is invalid: {error}") from error
+    return text
 
 
 def _package_name(text: str) -> str:
@@ -890,28 +899,99 @@ def _check_frameworks(
         findings.problems.append(str(error))
 
 
-def _check_settings(project: Project, targets: Sequence[Target], findings: Findings) -> None:
-    """Report the definitions and compiler options that cxy cannot set."""
-    used: dict[tuple[str, bool], list[str]] = {}
-    for target in targets:
+def _carry_settings(
+    project: Project,
+    library: Target | None,
+    program: Target | None,
+    tests: Sequence[Target],
+    objects: bool,
+    document: tomlkit.TOMLDocument,
+    findings: Findings,
+) -> None:
+    """Carry the definitions and options that the project sets into the manifest.
+
+    cxy gives every target the [build] settings, and passes a library's definitions on to
+    whatever links it: the program and the tests. The program's reach the tests that link
+    its objects. ``objects`` is whether there are any.
+    """
+    everything = [t for t in (library, program, *tests) if t is not None]
+    if not everything:
+        return
+    for target in everything:
+        if target.link_flags:
+            listed = " ".join(target.link_flags)
+            findings.problems.append(
+                f"{target.name} is linked with options cxy cannot set: {listed}"
+            )
+    usable = {d for t in everything for d in t.definitions if manifests.is_definition(d)}
+    for definition in sorted({d for t in everything for d in t.definitions} - usable):
+        findings.problems.append(f"cxy cannot set -D{definition}, which is not NAME or NAME=value")
+
+    def common(values: Sequence[tuple[str, ...]]) -> list[str]:
+        return [v for v in values[0] if all(v in other for other in values[1:])]
+
+    build_defines = [d for d in common([t.definitions for t in everything]) if d in usable]
+    build_flags = common([t.flags for t in everything])
+    lib_defines, lib_flags, bin_defines, bin_flags = [], [], [], []
+    if library is not None:
+        lib_defines = [d for d in library.definitions if d in usable and d not in build_defines]
+        lib_flags = [f for f in library.flags if f not in build_flags]
+    if program is not None:
+        bin_defines = [d for d in program.definitions if d in usable and d not in build_defines]
+        bin_flags = [f for f in program.flags if f not in build_flags]
+
+    dropped: dict[tuple[str, bool], list[str]] = {}
+    for target in everything:
+        given = {*build_defines, *lib_defines}
+        flags = set(build_flags)
+        if target is library:
+            flags |= set(lib_flags)
+        if target is program or (target in tests and objects):
+            given |= set(bin_defines)
+        if target is program:
+            flags |= set(bin_flags)
         files = _compiled_files(project, target.sources)
-        for definition in target.definitions:
+
+        def uses(definition: str, files: Mapping[str, str] = files) -> bool:
             macro = re.split(r"[=(]", definition, maxsplit=1)[0]
             pattern = re.compile(rf"\b{re.escape(macro)}\b")
-            needed = any(pattern.search(text) for text in files.values())
-            used.setdefault((definition, needed), []).append(target.name)
-        if target.flags:
+            return any(pattern.search(text) for text in files.values())
+
+        for definition in sorted(given - set(target.definitions)):
+            if uses(definition):
+                findings.problems.append(
+                    f"cxy would also compile {target.name} with -D{definition}, which it uses"
+                )
+        for definition in target.definitions:
+            if definition in usable and definition not in given:
+                dropped.setdefault((definition, uses(definition)), []).append(target.name)
+        if extra := [f for f in target.flags if f not in flags]:
             findings.problems.append(
-                f"{target.name} is compiled with options cxy cannot set: {' '.join(target.flags)}"
+                f"{target.name} is compiled with options cxy cannot set for it: {' '.join(extra)}"
             )
-    for (definition, needed), names in used.items():
+    for (definition, used), names in dropped.items():
         where = names[0] if len(names) == 1 else f"{len(names)} targets ({_some(names)})"
         verb = "is" if len(names) == 1 else "are"
-        message = f"{where} {verb} compiled with -D{definition}, which cxy cannot set"
-        if needed:
+        message = f"{where} {verb} compiled with -D{definition}, which cxy cannot set for them"
+        if used:
             findings.problems.append(message)
         else:
-            findings.warnings.append(f"{message}, but nothing they compile uses it")
+            findings.warnings.append(f"{message}; nothing they compile uses it, so it is left out")
+
+    for section, defines, flags, extra in (
+        ("build", build_defines, build_flags, {}),
+        ("lib", lib_defines, lib_flags, {"shared": True} if _is_shared(library) else {}),
+        ("bin", bin_defines, bin_flags, {}),
+    ):
+        table = {**extra, **({"defines": defines} if defines else {})}
+        if flags:
+            table["flags"] = flags
+        if table:
+            document[section] = table
+
+
+def _is_shared(library: Target | None) -> bool:
+    return library is not None and library.kind == "SHARED_LIBRARY"
 
 
 def _check_inherited(targets: Sequence[Target], provided: Provided, findings: Findings) -> None:

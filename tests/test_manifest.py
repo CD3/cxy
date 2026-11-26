@@ -33,11 +33,37 @@ zlib = "1.3.1"
         ('[layout]\nbuild = "."\n', "cannot be the project"),
         ('[layout]\nbuild = "src"\n', "cannot be inside"),
         ("[dependencies]\nfmt = 1\n", "version string"),
+        ('[build]\ndefines = ["1X"]\n', "NAME or NAME=value"),
+        ('[build]\ndefines = "X"\n', "list of strings"),
+        ('[lib]\nflags = ["-DX"]\n', "lib.defines"),
+        ('[bin]\nflags = ["/DX"]\n', "bin.defines"),
+        ("[bin]\nshared = true\n", "unknown key 'shared'"),
+        ('[lib]\nshared = "yes"\n', "true or false"),
+        ("[lib.core]\n", "unknown key 'core'"),
     ],
 )
 def test_errors(extra, message):
     with pytest.raises(CxyError, match=message):
         parse(PACKAGE + extra)
+
+
+def test_settings():
+    manifest = parse(
+        PACKAGE
+        + """
+[build]
+defines = ["X", 'Y="a b"']
+[lib]
+shared = true
+flags = ["-O2"]
+[bin]
+defines = ["Z=1"]
+"""
+    )
+    library, program = manifest.components
+    assert manifest.build.defines == ("X", 'Y="a b"')
+    assert library.shared and library.settings.flags == ("-O2",)
+    assert program.settings.defines == ("Z=1",) and not program.shared
 
 
 @pytest.mark.parametrize("name", ["test", "My App", "1app", "a;b"])

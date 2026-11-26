@@ -18,6 +18,7 @@ RESERVED_NAMES = {"all", "clean", "help", "install", "package", "test"}
 _PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _TOOL_VERSION = re.compile(r"[0-9][0-9A-Za-z.]*")
 _CONAN_NAME = re.compile(r"[a-z0-9_][a-z0-9_+.-]+")
+_DEFINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL)
 
 OptionValue = str | bool | int
 
@@ -46,6 +47,21 @@ class Layout:
     test_patterns: tuple[str, ...] = ("*_test.cpp", "*.test.cpp")
 
 
+@dataclass(frozen=True)
+class Settings:
+    """How to compile something."""
+
+    defines: tuple[str, ...] = ()
+    """Preprocessor definitions, as NAME or NAME=value."""
+    flags: tuple[str, ...] = ()
+    """Compiler options, passed as they are."""
+
+
+@dataclass(frozen=True)
+class LibrarySettings(Settings):
+    shared: bool = False
+
+
 class Kind(StrEnum):
     LIBRARY = "library"
     PROGRAM = "program"
@@ -65,6 +81,9 @@ class Component:
     """A program's main file, without its suffix, which may be that of any source."""
     uses: tuple[str, ...] = ()
     """The libraries that it links."""
+    settings: Settings = Settings()
+    """Its definitions reach whatever uses it; its flags apply only to its own sources."""
+    shared: bool = False
 
     @property
     def target(self) -> str:
@@ -97,18 +116,31 @@ class Manifest:
     tools: Mapping[str, str] = field(default_factory=dict)
     """Pinned versions of formatters and linters."""
 
+    build: Settings = Settings()
+    """Settings for everything the project compiles, tests included."""
+    library: LibrarySettings = LibrarySettings()
+    program: Settings = Settings()
+
     @property
     def components(self) -> tuple[Component, ...]:
         """The libraries, then the programs. [layout] describes one of each."""
         layout = self.layout
         return (
-            Component(self.name, Kind.LIBRARY, layout.lib, include=layout.include),
+            Component(
+                self.name,
+                Kind.LIBRARY,
+                layout.lib,
+                include=layout.include,
+                settings=Settings(self.library.defines, self.library.flags),
+                shared=self.library.shared,
+            ),
             Component(
                 self.name,
                 Kind.PROGRAM,
                 layout.src,
                 main=PurePosixPath(layout.src, "main").as_posix(),
                 uses=(self.name,),
+                settings=self.program,
             ),
         )
 
@@ -135,7 +167,18 @@ def parse(text: str) -> Manifest:
     data = tomllib.loads(text)
     _known(
         data,
-        {"package", "dependencies", "dev-dependencies", "overrides", "layout", "test", "tools"},
+        {
+            "package",
+            "dependencies",
+            "dev-dependencies",
+            "overrides",
+            "layout",
+            "test",
+            "tools",
+            "build",
+            "lib",
+            "bin",
+        },
         "top level",
     )
     package = _table(data, "package")
@@ -173,7 +216,15 @@ def parse(text: str) -> Manifest:
         test_working_directory=_test_working_directory(_table(data, "test")),
         test_separate=_boolean(_table(data, "test").get("separate", False), "test.separate"),
         tools=_tools(_table(data, "tools")),
+        build=Settings(**_settings(_table(data, "build"), "build")),
+        library=LibrarySettings(**_settings(_table(data, "lib"), "lib", frozenset({"shared"}))),
+        program=Settings(**_settings(_table(data, "bin"), "bin")),
     )
+
+
+def is_definition(text: str) -> bool:
+    """Whether a preprocessor definition is NAME or NAME=value."""
+    return _DEFINE.fullmatch(text) is not None
 
 
 def check_name(name: str) -> None:
@@ -217,6 +268,24 @@ def _dependency(name: str, value: Any, where: str) -> Dependency:
         cmake_package=None if package is None else _string(package, f"{where}.cmake.package"),
         cmake_targets=_strings(cmake.get("targets", []), f"{where}.cmake.targets"),
     )
+
+
+def _settings(
+    table: Mapping[str, Any], where: str, extra: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    _known(table, {"defines", "flags", *extra}, f"[{where}]")
+    defines = _strings(table.get("defines", []), f"{where}.defines")
+    for define in defines:
+        if not is_definition(define):
+            raise CxyError(f"{where}.defines: {define!r} is not NAME or NAME=value")
+    flags = _strings(table.get("flags", []), f"{where}.flags")
+    for flag in flags:
+        if flag.startswith(("-D", "/D")):
+            raise CxyError(f"{where}.flags: put {flag!r} in {where}.defines, without -D")
+    values: dict[str, Any] = {"defines": defines, "flags": flags}
+    for key in extra & table.keys():
+        values[key] = _boolean(table[key], f"{where}.{key}")
+    return values
 
 
 def _layout(table: Mapping[str, Any]) -> Layout:

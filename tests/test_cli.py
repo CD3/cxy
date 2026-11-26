@@ -77,6 +77,54 @@ def test_isolated_test_ignores_broken_code(tmp_path):
 
 
 @pytest.mark.e2e
+def test_definitions_and_shared_library(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    with (project / "cxy.toml").open("a", encoding="utf-8") as file:
+        file.write(
+            """
+[build]
+defines = ["EVERYWHERE"]
+
+[lib]
+shared = true
+defines = ['GREETING="Howdy"']
+
+[bin]
+defines = ['PUNCTUATION="?"']
+"""
+        )
+    required = "#ifndef EVERYWHERE\n#error EVERYWHERE is not defined\n#endif\n"
+    (project / "lib" / "greeting.cpp").write_text(
+        f'#include "demo/greeting.hpp"\n{required}'
+        "std::string demo::greet(std::string_view name) {\n"
+        '    return GREETING ", " + std::string(name) + "!";\n'
+        "}\n"
+    )
+    (project / "src" / "main.cpp").write_text(
+        f'#include <iostream>\n#include "demo/greeting.hpp"\n{required}'
+        "int main() { std::cout << demo::greet(\"world\") << PUNCTUATION << '\\n'; }\n"
+    )
+    # The library's definitions reach whatever uses it, tests included.
+    (project / "tests" / "greeting_test.cpp").unlink()
+    (project / "lib" / "greeting_test.cpp").write_text(
+        '#include "demo/greeting.hpp"\n#include <catch2/catch_test_macros.hpp>\n'
+        'TEST_CASE("greet") { REQUIRE(demo::greet("cxy") == GREETING ", cxy!"); }\n'
+    )
+
+    run = cxy("run", cwd=project)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "Howdy, world!?" in run.stdout
+    names = {"libdemo.so", "libdemo.dylib", "demo.dll"}
+    assert any(path.name in names for path in (project / "build" / "cxy").rglob("*demo*"))
+
+    test = cxy("test", cwd=project)
+    assert test.returncode == 0, test.stdout + test.stderr
+    isolated = cxy("test", "--test", "greeting", "--isolated", cwd=project)
+    assert isolated.returncode == 0, isolated.stdout + isolated.stderr
+
+
+@pytest.mark.e2e
 def test_export_builds_without_cxy(tmp_path):
     cxy("new", "demo", cwd=tmp_path)
     project = tmp_path / "demo"

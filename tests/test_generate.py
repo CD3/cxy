@@ -99,6 +99,57 @@ def test_isolated_program_skips_the_library():
     assert "lib/b.cpp" not in program and "app_lib " not in program
 
 
+def test_settings_reach_what_needs_them():
+    manifest = parse(
+        """
+[package]
+name = "app"
+version = "1.0"
+[dev-dependencies]
+catch2 = "3.7.1"
+[build]
+flags = ["-Wall"]
+[lib]
+shared = true
+defines = ['A="x"']
+flags = ["-O2"]
+[bin]
+defines = ["B"]
+flags = ["-O1"]
+"""
+    )
+    sources = Sources.default(
+        manifest,
+        lib=("lib/a.cpp",),
+        app=("src/b.cpp",),
+        main="src/main.cpp",
+        unit_tests=("lib/a_test.cpp",),
+    )
+    programs = plan_programs(manifest, sources, lambda _: set())
+    isolated = {"lib/a_test.cpp": ["lib/a.cpp"]}
+    text = cmake.cmakelists(manifest, sources, {}, programs=programs, isolated=isolated)
+    assert 'add_compile_options(\n  "-Wall"\n)' in text
+    assert "add_library(app_lib SHARED" in text
+    assert "WINDOWS_EXPORT_ALL_SYMBOLS ON" in text
+    assert 'target_compile_definitions(app_lib PUBLIC\n  "A=\\"x\\""\n)' in text
+    assert 'target_compile_options(app_lib PRIVATE\n  "-O2"\n)' in text
+    # The tests link the objects, so the program's definitions are public there.
+    assert 'target_compile_definitions(app_app PUBLIC\n  "B"\n)' in text
+    assert 'target_compile_options(app PRIVATE\n  "-O1"\n)' in text
+    program = text[text.index("add_executable(app_lib_a_test_isolated") :]
+    assert '"A=\\"x\\""\n    "B"\n' in program and '"-O2"\n    "-O1"\n' in program
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [("[lib]\nshared = true\n", "lib.shared"), ('[lib]\nflags = ["-O2"]\n', "build.flags")],
+)
+def test_settings_need_library_sources(extra, message):
+    manifest = parse(f'[package]\nname = "app"\nversion = "1.0"\n{extra}')
+    with pytest.raises(CxyError, match=message):
+        cmake.cmakelists(manifest, Sources.default(manifest, has_headers=True), {})
+
+
 def test_standalone_files_do_not_depend_on_cxy():
     conanfile = conan.conanfile(MANIFEST, standalone=True)
     ast.parse(conanfile)

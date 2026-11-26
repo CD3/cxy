@@ -75,25 +75,43 @@ def cmakelists(
         'set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")',
         "",
     ]
+    build = manifest.build
+    if build.defines or build.flags:
+        if build.defines:
+            out += _call("add_compile_definitions", [], map(quote, build.defines))
+        if build.flags:
+            out += _call("add_compile_options", [], map(quote, build.flags))
+        out.append("")
     out += _find_packages(manifest.dependencies, graph)
 
     for found in libraries:
         component = found.component
-        lib = component.target
+        lib, settings = component.target, component.settings
         include_dir = path(component.include or component.directory)
         if found.sources:
-            out += _call("add_library", [lib, "STATIC"], map(path, found.sources))
-            out += _call(
-                "set_target_properties", [lib, "PROPERTIES", "OUTPUT_NAME", component.name]
-            )
+            kind = "SHARED" if component.shared else "STATIC"
+            out += _call("add_library", [lib, kind], map(path, found.sources))
+            properties = ["OUTPUT_NAME", component.name]
+            if component.shared:
+                # Without exports, Visual C++ makes no import library to link against.
+                properties += ["WINDOWS_EXPORT_ALL_SYMBOLS", "ON"]
+            out += _call("set_target_properties", [lib, "PROPERTIES", *properties])
             out += _call("target_include_directories", [lib, "PUBLIC", include_dir])
             out += _call("target_include_directories", [lib, "PRIVATE", path(component.directory)])
             scope = "PUBLIC"
         else:
+            if component.shared:
+                raise CxyError("lib.shared needs library sources to compile, but there are none")
+            if settings.flags:
+                raise CxyError(
+                    "lib.flags apply to library sources, but there are none; use build.flags"
+                )
             out += _call("add_library", [lib, "INTERFACE"])
             out += _call("target_include_directories", [lib, "INTERFACE", include_dir])
             scope = "INTERFACE"
         out += _call("target_compile_features", [lib, scope, standard])
+        out += _definitions(lib, scope, settings.defines)
+        out += _options(lib, "PRIVATE", settings.flags)
         out += _link(lib, scope, links(component))
         out.append("")
 
@@ -102,6 +120,7 @@ def cmakelists(
     for found in executables:
         component = found.component
         exe, src_dir = component.target, path(component.directory)
+        settings = component.settings
         exe_links = links(component)
         if found.sources:
             # An object library lets the tests link the application's code without main().
@@ -109,6 +128,9 @@ def cmakelists(
             out += _call("add_library", [app, "OBJECT"], map(path, found.sources))
             out += _call("target_include_directories", [app, "PUBLIC", src_dir])
             out += _call("target_compile_features", [app, "PUBLIC", standard])
+            # Tests that link the objects see the same definitions.
+            out += _definitions(app, "PUBLIC", settings.defines)
+            out += _options(app, "PRIVATE", settings.flags)
             out += _link(app, "PUBLIC", exe_links)
             exe_links = [app, *exe_links]
             objects.append(app)
@@ -116,11 +138,18 @@ def cmakelists(
         out += _call("add_executable", [exe], [path(found.main)])
         out += _call("target_include_directories", [exe, "PRIVATE", src_dir])
         out += _call("target_compile_features", [exe, "PRIVATE", standard])
+        if not found.sources:
+            out += _definitions(exe, "PRIVATE", settings.defines)
+        out += _options(exe, "PRIVATE", settings.flags)
         out += _link(exe, "PRIVATE", exe_links)
         out.append("")
     app_links = [*objects, *(list(library_targets.values()) or dependency_targets)]
     private_dirs = [path(found.component.directory) for found in sources.components]
     search_dirs = list(map(path, manifest.include_directories))
+    # Isolated tests compile the components' sources themselves, so they need their settings.
+    built = [found.component.settings for found in (*libraries, *executables)]
+    isolated_defines = list(dict.fromkeys(d for settings in built for d in settings.defines))
+    isolated_flags = list(dict.fromkeys(f for settings in built for f in settings.flags))
 
     if programs:
         dev = {d.name: d for d in manifest.dev_dependencies}
@@ -173,6 +202,8 @@ def cmakelists(
             ]
             body += _call("target_include_directories", [target, "PRIVATE", *search_dirs])
             body += _call("target_compile_features", [target, "PRIVATE", standard])
+            body += _definitions(target, "PRIVATE", isolated_defines)
+            body += _options(target, "PRIVATE", isolated_flags)
             body += _link(target, "PRIVATE", [*test_links(program), *dependency_targets])
         out += ["if(BUILD_TESTING)", *(f"  {line}" if line else "" for line in body), "endif()"]
     return "\n".join(out).rstrip() + "\n"
@@ -196,6 +227,16 @@ def _call(command: str, arguments: Iterable[str], items: Iterable[str] = ()) -> 
 def _link(target: str, scope: str, libraries: Iterable[str]) -> list[str]:
     libraries = list(libraries)
     return _call("target_link_libraries", [target, scope, *libraries]) if libraries else []
+
+
+def _definitions(target: str, scope: str, defines: Sequence[str]) -> list[str]:
+    return (
+        _call("target_compile_definitions", [target, scope], map(quote, defines)) if defines else []
+    )
+
+
+def _options(target: str, scope: str, flags: Sequence[str]) -> list[str]:
+    return _call("target_compile_options", [target, scope], map(quote, flags)) if flags else []
 
 
 def _find_packages(dependencies: Iterable[Dependency], graph: Mapping[str, CMakeInfo]) -> list[str]:

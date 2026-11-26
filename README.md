@@ -68,6 +68,18 @@ fmt = "10.2.0"
 [tools]                # optional exact versions of formatters and linters, run with uv
 clang-format = "18.1.8"
 
+[build]                # optional, for everything compiled, tests included
+defines = ["USE_SIMD", 'LOG_LEVEL="info"']
+flags = ["-Wall"]      # passed to the compiler as they are
+
+[lib]                  # optional, for the library
+shared = true          # build a shared library; by default it is static
+defines = ["HAVE_HDF5"]
+flags = ["-O3"]
+
+[bin]                  # optional, for the application
+defines = ["APP_NAME=\"hello\""]
+
 [layout]               # defaults
 lib = "lib"
 src = "src"
@@ -82,6 +94,12 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - Everything in `tests/` goes into one test program for each test framework, unless `separate` is
   set.
 - Layout directories may coincide, for example `lib = "src"` and `include = "src"`.
+- Definitions in `[lib]` reach whatever uses the library, since its headers may depend on them:
+  the application and the tests. Those in `[bin]` reach the tests that use the application's
+  code. Flags in `[lib]` and `[bin]` apply only to their own sources.
+- Definitions are `NAME` or `NAME=value`, without `-D`. Flags are not portable between compilers.
+- On Windows, a shared library exports all its functions, so that it needs no export macros, but
+  not its global variables.
 
 ## Dependencies
 
@@ -270,13 +288,16 @@ project: it runs Conan and CMake on the project in `build/cxy/port`, and reads w
 about each target with its File API. `cxy port --dry-run` prints the manifest instead.
 
 It finds the dependencies, their options and overrides, the C++ standard, which directories hold
-the library, application, headers and tests, and the test framework. Anything that cxy would build
+the library, application, headers and tests, the test framework, and the definitions and compiler
+options that the project sets, which go in `[build]`, `[lib]` and `[bin]`. Anything that cxy would build
 differently is a problem, and then `cxy.toml` is written only with `--force`:
 
 - more than one library or application;
 - an application whose `main()` is not in a file named `main.cpp`;
 - files that one of them compiles and cxy would not, or the reverse;
-- compile definitions and compiler options that the project sets and its code uses;
+- compile definitions and options that cxy cannot give the same targets, such as one only for the
+  tests, or a library's definition that the application does not get but uses;
+- link options;
 - flags and libraries from somewhere other than Conan, such as CMake's `FindOpenMP`;
 - tool requirements other than CMake and Ninja, and options for packages that are not direct
   dependencies.
