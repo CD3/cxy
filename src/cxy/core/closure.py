@@ -38,7 +38,7 @@ def test_names(project: Project, test: str) -> set[str]:
 
 def needed(project: Project, sources: Sources, test: str) -> tuple[str, ...]:
     """Return the project sources needed to link a unit test, excluding the test itself."""
-    candidates = (*sources.lib, *sources.app)
+    candidates = sources.compiled
     found: set[str] = set()
     pending = [test]
     if name := tested_name(project, test):
@@ -85,13 +85,7 @@ def include_names(project: Project, file: str) -> list[str]:
 
 def included_files(project: Project, file: str) -> list[str]:
     """Return the project files that a file includes."""
-    layout = project.manifest.layout
-    directories = [
-        str(PurePosixPath(file).parent),
-        layout.include,
-        layout.lib,
-        layout.src,
-    ]
+    directories = [str(PurePosixPath(file).parent), *project.manifest.include_directories]
     headers = []
     for include in include_names(project, file):
         for directory in directories:

@@ -4,6 +4,7 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -45,6 +46,36 @@ class Layout:
     test_patterns: tuple[str, ...] = ("*_test.cpp", "*.test.cpp")
 
 
+class Kind(StrEnum):
+    LIBRARY = "library"
+    PROGRAM = "program"
+
+
+@dataclass(frozen=True)
+class Component:
+    """Where to find the files of a library or program that the project builds."""
+
+    name: str
+    kind: Kind
+    directory: str
+    """Its sources and private headers."""
+    include: str | None = None
+    """A library's public headers."""
+    main: str | None = None
+    """A program's main file, without its suffix, which may be that of any source."""
+    uses: tuple[str, ...] = ()
+    """The libraries that it links."""
+
+    @property
+    def target(self) -> str:
+        return f"{self.name}_lib" if self.kind is Kind.LIBRARY else self.name
+
+    @property
+    def objects(self) -> str:
+        """The target for a program's sources apart from its main file, which tests link."""
+        return f"{self.name}_app"
+
+
 @dataclass(frozen=True)
 class Manifest:
     name: str
@@ -65,6 +96,28 @@ class Manifest:
 
     tools: Mapping[str, str] = field(default_factory=dict)
     """Pinned versions of formatters and linters."""
+
+    @property
+    def components(self) -> tuple[Component, ...]:
+        """The libraries, then the programs. [layout] describes one of each."""
+        layout = self.layout
+        return (
+            Component(self.name, Kind.LIBRARY, layout.lib, include=layout.include),
+            Component(
+                self.name,
+                Kind.PROGRAM,
+                layout.src,
+                main=PurePosixPath(layout.src, "main").as_posix(),
+                uses=(self.name,),
+            ),
+        )
+
+    @property
+    def include_directories(self) -> tuple[str, ...]:
+        """Where the project's own includes are found, after the including file's directory."""
+        components = self.components
+        public = (c.include for c in components if c.include is not None)
+        return (*public, *(c.directory for c in components))
 
 
 def load(path: Path) -> Manifest:

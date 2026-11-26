@@ -22,7 +22,9 @@ def plan(sources, classes=None, **kwargs):
     return {p.target: (p.framework.package, p.sources) for p in programs}
 
 
-TESTS = Sources(unit_tests=("lib/a_test.cpp",), tests=("tests/b.cpp", "tests/c.cpp"))
+TESTS = Sources.default(
+    manifest(), unit_tests=("lib/a_test.cpp",), tests=("tests/b.cpp", "tests/c.cpp")
+)
 
 
 @pytest.mark.parametrize("name", ["catch2", "gtest"])
@@ -35,7 +37,11 @@ def test_one_framework(name, included):
 
 @pytest.mark.parametrize("separate", ["", "[test]\nseparate = true\n"])
 @pytest.mark.parametrize(
-    "sources", [Sources(unit_tests=("lib/a_test.cpp",)), Sources(tests=("tests/b.cpp",))]
+    "sources",
+    [
+        Sources.default(manifest(), unit_tests=("lib/a_test.cpp",)),
+        Sources.default(manifest(), tests=("tests/b.cpp",)),
+    ],
 )
 def test_using_a_framework_that_is_not_available(sources, separate):
     def check(extra, message):
@@ -53,7 +59,9 @@ def test_both_frameworks():
         "tests/b.cpp": {"catch2"},
         "tests/c.cpp": {"gtest"},
     }
-    sources = Sources(unit_tests=TESTS.unit_tests, tests=(*TESTS.tests, "tests/helper.cpp"))
+    sources = Sources.default(
+        manifest(), unit_tests=TESTS.unit_tests, tests=(*TESTS.tests, "tests/helper.cpp")
+    )
     assert plan(sources, classes) == {
         "app_lib_a_test": ("gtest", ("lib/a_test.cpp",)),
         "app_tests_catch2": ("catch2", ("tests/b.cpp", "tests/helper.cpp")),
@@ -63,11 +71,16 @@ def test_both_frameworks():
 
 def test_both_available_but_one_used_in_tests():
     classes = {"tests/b.cpp": {"gtest"}}
-    assert plan(Sources(tests=TESTS.tests), classes) == {"app_tests": ("gtest", TESTS.tests)}
+    assert plan(Sources.default(manifest(), tests=TESTS.tests), classes) == {
+        "app_tests": ("gtest", TESTS.tests)
+    }
 
 
 def test_undecided():
-    for sources in Sources(unit_tests=TESTS.unit_tests), Sources(tests=TESTS.tests):
+    for sources in (
+        Sources.default(manifest(), unit_tests=TESTS.unit_tests),
+        Sources.default(manifest(), tests=TESTS.tests),
+    ):
         with pytest.raises(CxyError, match="cannot tell"):
             plan(sources)
         (program,) = plan(sources, extra='[test]\nframework = "gtest"\n').values()
@@ -76,13 +89,16 @@ def test_undecided():
 
 def test_including_both_is_always_an_error():
     classes = {"lib/a_test.cpp": {"gtest", "catch2"}, "tests/b.cpp": {"gtest", "catch2"}}
-    for sources in Sources(unit_tests=TESTS.unit_tests), Sources(tests=TESTS.tests):
+    for sources in (
+        Sources.default(manifest(), unit_tests=TESTS.unit_tests),
+        Sources.default(manifest(), tests=TESTS.tests),
+    ):
         with pytest.raises(CxyError, match="includes both catch2 and gtest"):
             plan(sources, classes, extra='[test]\nframework = "gtest"\n')
 
 
 def test_missing_framework():
-    assert plan(Sources(lib=("a.cpp",)), dev="") == {}
+    assert plan(Sources.default(manifest(), lib=("a.cpp",)), dev="") == {}
     with pytest.raises(CxyError, match="add catch2 or gtest"):
         plan(TESTS, dev="")
     with pytest.raises(CxyError, match="not in"):
@@ -124,7 +140,7 @@ def test_gtest_links():
 
 def test_cmake_for_both():
     classes = {"tests/b.cpp": {"catch2"}, "tests/c.cpp": {"gtest"}}
-    sources = Sources(lib=("lib/a.cpp",), tests=TESTS.tests)
+    sources = Sources.default(manifest(), lib=("lib/a.cpp",), tests=TESTS.tests)
     both = manifest()
     programs = plan_programs(both, sources, classes.__getitem__)
     text = cmake.cmakelists(both, sources, {}, programs=programs)
@@ -140,7 +156,8 @@ def test_filters():
 
 
 def test_separate():
-    sources = Sources(
+    sources = Sources.default(
+        manifest(),
         unit_tests=("lib/a_test.cpp",),
         tests=("tests/b.cpp", "tests/helper.cpp", "tests/main.cpp", "tests/sub/c.cpp"),
     )
@@ -175,11 +192,13 @@ def test_separate_errors():
     with pytest.raises(CxyError, match="no tests found in tests/"):
         plan_programs(
             manifest('gtest = "1"\n', "[test]\nseparate = true\n"),
-            Sources(tests=("tests/helper.cpp",)),
+            Sources.default(manifest(), tests=("tests/helper.cpp",)),
             lambda _: set(),
             lambda _: False,
         )
-    assert plan(Sources(lib=("a.cpp",)), extra="[test]\nseparate = true\n") == {}
+    assert (
+        plan(Sources.default(manifest(), lib=("a.cpp",)), extra="[test]\nseparate = true\n") == {}
+    )
 
 
 @pytest.mark.parametrize(
@@ -211,7 +230,11 @@ def test_working_directory(root):
         project = manifest('gtest = "1"\n', extra)
         programs = plan_programs(project, TESTS, lambda _: set())
         return cmake.cmakelists(
-            project, Sources(lib=("lib/a.cpp",)), {}, programs=programs, root=root
+            project,
+            Sources.default(manifest(), lib=("lib/a.cpp",)),
+            {},
+            programs=programs,
+            root=root,
         )
 
     assert "WORKING_DIRECTORY" not in text("")

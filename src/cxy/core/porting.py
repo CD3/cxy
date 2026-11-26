@@ -820,7 +820,7 @@ def _compare(
     """Report files that cxy would build differently, and return whether tests are separate."""
     tests_dir = project.manifest.layout.tests
     built = {*(library.sources if library else ()), *(program.sources if program else ())}
-    ours = {*sources.lib, *sources.app, *([sources.main] if sources.main else [])}
+    ours = {*sources.compiled, *(found.main for found in sources.programs if found.main)}
     _differences(built, ours, "the library and application", findings.problems)
 
     tested = {source for target in tests for source in target.sources} - built

@@ -153,7 +153,9 @@ def plan_programs(
             raise undecided(f"{manifest.layout.tests}/")
         groups[preferred] = []
 
-    used = {name, f"{name}_lib", f"{name}_app", f"{name}_tests"}
+    used = {f"{name}_tests"}
+    for found in sources.components:
+        used |= {found.component.target, found.component.objects}
     used |= {f"{name}_tests_{framework}" for framework in groups}
     programs = []
     for source in (*sources.unit_tests, *separate):

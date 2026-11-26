@@ -31,22 +31,23 @@ def test_default_layout_with_tests_beside_sources(make):
         "tests/helpers.cpp",
         "build/cxy/x.cpp",
     ).sources()
-    assert sources.lib == ("lib/a.cpp",)
-    assert sources.app == ("src/cli.cpp",)
-    assert sources.main == "src/main.cpp"
+    library, program = sources.components
+    assert library.sources == ("lib/a.cpp",)
+    assert (program.sources, program.main) == (("src/cli.cpp",), "src/main.cpp")
     assert sources.unit_tests == (
         "include/app/a.test.cpp",
         "lib/a_test.cpp",
         "src/cli_test.cpp",
     )
     assert sources.tests == ("tests/helpers.cpp",)
-    assert sources.has_headers
+    assert library.has_headers
 
 
 def test_everything_in_src(make):
     layout = '[layout]\nlib = "src"\ninclude = "src"\ntests = "src/tests"\n'
     sources = make("src/a.cpp", "src/main.cpp", "src/tests/t.cpp", layout=layout).sources()
-    assert (sources.lib, sources.main, sources.tests) == (
+    library, program = sources.components
+    assert (library.sources, program.main, sources.tests) == (
         ("src/a.cpp",),
         "src/main.cpp",
         ("src/tests/t.cpp",),

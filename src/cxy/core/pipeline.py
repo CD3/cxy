@@ -43,10 +43,12 @@ def build(project: Project, options: BuildOptions) -> None:
 
 
 def run(project: Project, options: BuildOptions, arguments: Sequence[str]) -> int:
-    if project.sources().main is None:
+    programs = project.sources().programs
+    if not programs:
         raise CxyError(f"nothing to run: no main.cpp in {project.manifest.layout.src}/")
-    directory = _build(project, options, [project.manifest.name])
-    return tools.execute(_program(directory, project.manifest.name), arguments)
+    target = programs[0].component.target
+    directory = _build(project, options, [target])
+    return tools.execute(_program(directory, target), arguments)
 
 
 def test(

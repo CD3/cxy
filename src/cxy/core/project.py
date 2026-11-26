@@ -8,28 +8,76 @@ from pathlib import Path, PurePosixPath
 
 from cxy.core import manifest as manifests
 from cxy.core.errors import CxyError
-from cxy.core.manifest import Manifest
+from cxy.core.manifest import Component, Kind, Manifest
 
 SOURCE_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 
 
 @dataclass(frozen=True)
+class ComponentSources:
+    """The files found for a library or program, relative to the project root."""
+
+    component: Component
+    sources: tuple[str, ...] = ()
+    """What it compiles, apart from a program's main file."""
+    main: str | None = None
+    has_headers: bool = False
+    """Whether a library has public headers."""
+
+    @property
+    def exists(self) -> bool:
+        if self.component.kind is Kind.LIBRARY:
+            return bool(self.sources) or self.has_headers
+        return self.main is not None
+
+
+@dataclass(frozen=True)
 class Sources:
     """Source paths relative to the project root, in POSIX form."""
 
-    lib: tuple[str, ...] = ()
-    app: tuple[str, ...] = ()
-    main: str | None = None
+    components: tuple[ComponentSources, ...] = ()
+    """Every component of the layout, including those without files."""
     unit_tests: tuple[str, ...] = ()
     """Tests beside the code they test. Each becomes its own program."""
     tests: tuple[str, ...] = ()
     """Sources in the tests directory. Together they become one program."""
-    has_headers: bool = False
+
+    @classmethod
+    def default(
+        cls,
+        manifest: Manifest,
+        *,
+        lib: tuple[str, ...] = (),
+        app: tuple[str, ...] = (),
+        main: str | None = None,
+        has_headers: bool = False,
+        unit_tests: tuple[str, ...] = (),
+        tests: tuple[str, ...] = (),
+    ) -> "Sources":
+        """Return the sources of a project with one library and one program."""
+        library, program = manifest.components
+        return cls(
+            (
+                ComponentSources(library, lib, has_headers=has_headers),
+                ComponentSources(program, app, main),
+            ),
+            unit_tests,
+            tests,
+        )
 
     @property
-    def has_library(self) -> bool:
-        return bool(self.lib) or self.has_headers
+    def libraries(self) -> list[ComponentSources]:
+        return [c for c in self.components if c.component.kind is Kind.LIBRARY and c.exists]
+
+    @property
+    def programs(self) -> list[ComponentSources]:
+        return [c for c in self.components if c.component.kind is Kind.PROGRAM and c.exists]
+
+    @property
+    def compiled(self) -> tuple[str, ...]:
+        """The sources of every component, apart from main files."""
+        return tuple(source for c in self.components for source in c.sources)
 
 
 @dataclass(frozen=True)
@@ -55,63 +103,74 @@ class Project:
         return self.root / self.manifest.layout.build / "cxy"
 
     def sources(self) -> Sources:
-        layout = self.manifest.layout
-        roles = [
-            (PurePosixPath(getattr(layout, role)), role)
-            for role in ("tests", "src", "lib", "include")
+        manifest = self.manifest
+        components = manifest.components
+        # (directory, component index or None for the tests directory, whether it holds headers)
+        claims: list[tuple[PurePosixPath, int | None, bool]] = [
+            (PurePosixPath(manifest.layout.tests), None, False)
         ]
-        lib: list[str] = []
-        app: list[str] = []
+        for index, component in enumerate(components):
+            claims.append((PurePosixPath(component.directory), index, False))
+            if component.include is not None:
+                claims.append((PurePosixPath(component.include), index, True))
+        found: list[list[str]] = [[] for _ in components]
+        mains: list[str | None] = [None for _ in components]
+        headers = [False for _ in components]
         unit_tests: list[str] = []
         tests: list[str] = []
-        main: str | None = None
-        has_headers = False
         for path in self._files():
             # The deepest configured directory containing the file decides its role.
-            matches = [(d, role) for d, role in roles if path.is_relative_to(d)]
+            matches = [claim for claim in claims if path.is_relative_to(claim[0])]
             if not matches:
                 continue
-            depth = max(len(d.parts) for d, _ in matches)
-            owners = {role for d, role in matches if len(d.parts) == depth}
+            depth = max(len(d.parts) for d, _, _ in matches)
+            owners = [(index, public) for d, index, public in matches if len(d.parts) == depth]
             if path.suffix in HEADER_SUFFIXES:
-                has_headers = has_headers or "include" in owners
+                for index, public in owners:
+                    if public and index is not None:
+                        headers[index] = True
                 continue
             name = path.as_posix()
-            is_test = any(fnmatchcase(path.name, p) for p in layout.test_patterns)
-            if "tests" in owners:
+            owned = sorted({index for index, public in owners if index is not None and not public})
+            if any(index is None for index, _ in owners):
                 tests.append(name)
-            elif is_test:
+            elif any(fnmatchcase(path.name, p) for p in manifest.layout.test_patterns):
                 unit_tests.append(name)
-            elif "src" in owners and path == PurePosixPath(layout.src) / f"main{path.suffix}":
-                if main is not None:
+            elif (
+                program := next(
+                    (i for i in owned if components[i].main == path.with_suffix("").as_posix()),
+                    None,
+                )
+            ) is not None:
+                if (main := mains[program]) is not None:
                     raise CxyError(f"both {main} and {name} look like the application's main file")
-                main = name
-            elif "lib" in owners:
-                lib.append(name)
-            elif "src" in owners:
-                app.append(name)
+                mains[program] = name
+            elif owned:
+                found[owned[0]].append(name)
         return Sources(
-            lib=tuple(lib),
-            app=tuple(app),
-            main=main,
-            unit_tests=tuple(unit_tests),
-            tests=tuple(tests),
-            has_headers=has_headers,
+            tuple(
+                ComponentSources(component, tuple(found[i]), mains[i], headers[i])
+                for i, component in enumerate(components)
+            ),
+            tuple(unit_tests),
+            tuple(tests),
         )
 
     def files(self) -> list[Path]:
         """Return every file in the layout directories and directly in the root."""
-        layout = self.manifest.layout
         found = {path for path in self.root.iterdir() if path.is_file()}
-        for top in {layout.lib, layout.src, layout.include, layout.tests}:
+        for top in self._tops():
             found.update(self._walk(top))
         return sorted(found)
 
+    def _tops(self) -> set[str]:
+        manifest = self.manifest
+        return {manifest.layout.tests, *manifest.include_directories}
+
     def _files(self) -> list[PurePosixPath]:
-        layout = self.manifest.layout
         found = {
             PurePosixPath(path.relative_to(self.root).as_posix())
-            for top in {layout.lib, layout.src, layout.include, layout.tests}
+            for top in self._tops()
             for path in self._walk(top)
             if path.suffix in SOURCE_SUFFIXES | HEADER_SUFFIXES
         }

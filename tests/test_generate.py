@@ -50,8 +50,12 @@ def test_graph_names():
 
 
 def test_cmake_app_objects_are_shared_with_tests():
-    sources = Sources(
-        lib=("lib/a.cpp",), app=("src/b.cpp",), main="src/main.cpp", tests=("tests/t.cpp",)
+    sources = Sources.default(
+        MANIFEST,
+        lib=("lib/a.cpp",),
+        app=("src/b.cpp",),
+        main="src/main.cpp",
+        tests=("tests/t.cpp",),
     )
     text = cmake.cmakelists(
         MANIFEST,
@@ -67,7 +71,8 @@ def test_cmake_app_objects_are_shared_with_tests():
 
 
 def test_unit_tests_get_their_own_programs():
-    sources = Sources(
+    sources = Sources.default(
+        MANIFEST,
         lib=("lib/a.cpp",),
         unit_tests=("lib/a_b_test.cpp", "lib/a/b_test.cpp"),
         tests=("tests/x.cpp", "tests/y.cpp"),
@@ -82,7 +87,9 @@ def test_unit_tests_get_their_own_programs():
 
 
 def test_isolated_program_skips_the_library():
-    sources = Sources(lib=("lib/a.cpp", "lib/b.cpp"), unit_tests=("lib/a_test.cpp",))
+    sources = Sources.default(
+        MANIFEST, lib=("lib/a.cpp", "lib/b.cpp"), unit_tests=("lib/a_test.cpp",)
+    )
     isolated = {"lib/a_test.cpp": ["lib/a.cpp"]}
     text = cmake.cmakelists(
         MANIFEST, sources, {}, programs=programs_for(sources), isolated=isolated
@@ -96,17 +103,25 @@ def test_standalone_files_do_not_depend_on_cxy():
     conanfile = conan.conanfile(MANIFEST, standalone=True)
     ast.parse(conanfile)
     assert 'check_min_cppstd(self, "20")' in conanfile
-    cmakelists = cmake.cmakelists(MANIFEST, Sources(lib=("lib/a.cpp",)), {})
+    cmakelists = cmake.cmakelists(MANIFEST, Sources.default(MANIFEST, lib=("lib/a.cpp",)), {})
     assert "cxy" not in conanfile + cmakelists
     assert "ROOT_DIR" not in cmakelists and "WIN32" not in cmakelists
 
 
 def test_cmake_errors():
     with pytest.raises(CxyError, match="nothing to build"):
-        cmake.cmakelists(MANIFEST, Sources(), {})
+        cmake.cmakelists(
+            MANIFEST,
+            Sources.default(
+                MANIFEST,
+            ),
+            {},
+        )
     plain = parse('[package]\nname = "app"\nversion = "1"\n')
     with pytest.raises(CxyError, match="catch2"):
-        plan_programs(plain, Sources(lib=("lib/a.cpp",), tests=("t.cpp",)), lambda _: set())
+        plan_programs(
+            plain, Sources.default(MANIFEST, lib=("lib/a.cpp",), tests=("t.cpp",)), lambda _: set()
+        )
 
 
 def test_quote():
