@@ -8,6 +8,12 @@
   when there is a concrete need. See `core/tools.py`.
 - **Caching lint results.** clang-tidy runs on every file each time. A cache must account for every
   included header, including those outside the layout, or it would hide problems.
+- **Hidden symbol visibility for shared libraries.** A shared library exports every symbol by
+  default on Linux and macOS. `-fvisibility=hidden` exports only the API, which shrinks the library
+  and its symbol table, but the API then needs export macros (CMake's `generate_export_header`),
+  as Windows DLLs do anyway. Tests that call internal functions would have to compile the sources
+  directly, as isolated test programs already do. For the smallest single program, static linking
+  with `--gc-sections` or LTO may serve better. Revisit with the `shared` setting.
 
 ## Decided
 
