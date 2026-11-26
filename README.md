@@ -18,7 +18,7 @@ cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
 ```
 
-Commands: `new`, `init`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
+Commands: `new`, `init`, `port`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
 
 
 ## Why?
@@ -261,6 +261,28 @@ is none the C++ files are not checked, and the command fails.
 
 Project configuration can run code: cmake-lint reads `.cmake-format.py`, and gersemi can load
 extensions. Be careful when checking a project that you do not trust.
+
+## Using cxy in an existing project
+
+In a CMake project that uses Conan, `cxy port` writes a `cxy.toml` that builds the same thing, so
+that you can use cxy while everyone else keeps their own setup. It writes nothing else in the
+project: it runs Conan and CMake on the project in `build/cxy/port`, and reads what CMake reports
+about each target with its File API. `cxy port --dry-run` prints the manifest instead.
+
+It finds the dependencies, their options and overrides, the C++ standard, which directories hold
+the library, application, headers and tests, and the test framework. Anything that cxy would build
+differently is a problem, and then `cxy.toml` is written only with `--force`:
+
+- more than one library or application;
+- an application whose `main()` is not in a file named `main.cpp`;
+- files that one of them compiles and cxy would not, or the reverse;
+- compile definitions and compiler options that the project sets and its code uses;
+- flags and libraries from somewhere other than Conan, such as CMake's `FindOpenMP`;
+- tool requirements other than CMake and Ninja, and options for packages that are not direct
+  dependencies.
+
+Warnings are for what to check, such as a C++ standard that only comes from your Conan profile. A
+recipe or `CMakeLists.txt` can run any code, so only port projects that you trust.
 
 ## Sharing a project with people who do not use cxy
 

@@ -242,8 +242,8 @@ def lock(
     upgrade_packages: Sequence[str] = (),
 ) -> None:
     """Bring cxy.lock up to date without installing anything."""
-    _create_build_dir(project)
-    _ensure_profile(project, options)
+    create_build_dir(project)
+    ensure_profile(project, options)
     conanfile = _write_conanfile(project)
     directory = project.build_dir / options.build_type.lower()
     path = project.root / locks.FILENAME
@@ -407,7 +407,7 @@ def clean(project: Project) -> None:
 def _prepare(project: Project, options: BuildOptions, sources: Sources) -> Path:
     # Report project errors before running tools.
     cmake.cmakelists(project.manifest, sources, {}, programs=testing.plan(project, sources))
-    _create_build_dir(project)
+    create_build_dir(project)
     return project.build_dir / options.build_type.lower()
 
 
@@ -450,7 +450,7 @@ def configure(
     return directory
 
 
-def _create_build_dir(project: Project) -> None:
+def create_build_dir(project: Project) -> None:
     directory = project.build_dir
     if directory.exists():
         return
@@ -468,7 +468,7 @@ def _install(project: Project, options: BuildOptions, directory: Path) -> dict[s
     output = directory / "conan"
     graph_file = output / "graph.json"
     toolchain = output / "conan_toolchain.cmake"
-    _ensure_profile(project, options)
+    ensure_profile(project, options)
 
     def stamp() -> Stamp:
         return Stamp(
@@ -557,7 +557,7 @@ def _conan_home() -> Path:
     return Path(os.environ.get("CONAN_HOME") or Path.home() / ".conan2")
 
 
-def _ensure_profile(project: Project, options: BuildOptions) -> None:
+def ensure_profile(project: Project, options: BuildOptions) -> None:
     if options.profile != "default" or os.environ.get("CONAN_DEFAULT_PROFILE"):
         return
     home = _conan_home()
