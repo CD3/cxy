@@ -102,6 +102,36 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - On Windows, a shared library exports all its functions, so that it needs no export macros, but
   not its global variables.
 
+### Several libraries and programs
+
+Named `[lib.NAME]` and `[bin.NAME]` tables replace the library and program that `[layout]`
+describes, so one kind can be named while `[layout]` still describes the other:
+
+```toml
+[lib.core]
+sources = "src/core"       # its sources and private headers
+include = "include"        # its public headers; by default, the sources directory
+shared = true              # also defines and flags, as in [lib]
+
+[lib.io]
+sources = "src/io"
+uses = ["core"]            # libraries it links, which pass on their definitions
+
+[bin.scatter]
+sources = "apps/scatter"   # main.cpp here is the main file
+
+[bin.convert]
+main = "tools/convert.cpp" # a program may be only its main file
+uses = ["io"]              # by default, every library
+```
+
+- The deepest directory decides where a file belongs, as with `[layout]`.
+- Tests link every library and the code of every program.
+- `cxy run --bin NAME` chooses the program to run, if there are several.
+- A static library that a shared one uses is compiled as position-independent code.
+- In exported files, `BUILD_SHARED_LIBS` and Conan's `shared` option choose the kind of library
+  only if all libraries are alike. Otherwise each keeps its own kind.
+
 ## Dependencies
 
 ```sh
@@ -289,12 +319,13 @@ project: it runs Conan and CMake on the project in `build/cxy/port`, and reads w
 about each target with its File API. `cxy port --dry-run` prints the manifest instead.
 
 It finds the dependencies, their options and overrides, the C++ standard, which directories hold
-the library, application, headers and tests, the test framework, and the definitions and compiler
+the libraries, programs, headers and tests, which libraries each uses, the test framework, and the definitions and compiler
 options that the project sets, which go in `[build]`, `[lib]` and `[bin]`. Anything that cxy would build
 differently is a problem, and then `cxy.toml` is written only with `--force`:
 
-- more than one library or application;
-- an application whose `main()` is not in a file named `main.cpp`;
+- an application whose `main()` is not in a file named `main.cpp`, or, with several programs, a
+  program whose main file cannot be found;
+- libraries or programs that cxy cannot tell apart, such as two in one directory;
 - files that one of them compiles and cxy would not, or the reverse;
 - compile definitions and options that cxy cannot give the same targets, such as one only for the
   tests, or a library's definition that the application does not get but uses;

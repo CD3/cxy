@@ -62,3 +62,44 @@ def test_find_walks_up(make, tmp_path):
 def test_two_mains(make):
     with pytest.raises(CxyError, match="main file"):
         make("src/main.cpp", "src/main.cc").sources()
+
+
+def test_components(make):
+    layout = """
+[lib.core]
+sources = "src/core"
+[lib.io]
+sources = "src/io"
+include = "include"
+[bin.scatter]
+sources = "apps/scatter"
+[bin.convert]
+main = "tools/convert.cpp"
+"""
+    project = make(
+        "src/core/a.cpp",
+        "src/core/a.hpp",
+        "src/io/b.cpp",
+        "include/io/b.hpp",
+        "src/io/b_test.cpp",
+        "apps/scatter/main.cpp",
+        "apps/scatter/cli.cpp",
+        "tools/convert.cpp",
+        "tools/unrelated.cpp",
+        "tests/t.cpp",
+        layout=layout,
+    )
+    core, io, scatter, convert = project.sources().components
+    assert (core.sources, core.has_headers) == (("src/core/a.cpp",), True)
+    assert (io.sources, io.has_headers) == (("src/io/b.cpp",), True)
+    assert (scatter.sources, scatter.main) == (("apps/scatter/cli.cpp",), "apps/scatter/main.cpp")
+    assert (convert.sources, convert.main) == ((), "tools/convert.cpp")
+    sources = project.sources()
+    assert sources.unit_tests == ("src/io/b_test.cpp",) and sources.tests == ("tests/t.cpp",)
+    assert "tools/convert.cpp" in [p.relative_to(project.root).as_posix() for p in project.files()]
+
+
+def test_a_main_file_in_a_library_directory(make):
+    layout = '[layout]\nlib = "src"\n[bin.tool]\nmain = "src/tool.cpp"\n'
+    library, tool = make("src/a.cpp", "src/tool.cpp", layout=layout).sources().components
+    assert library.sources == ("src/a.cpp",) and tool.main == "src/tool.cpp"

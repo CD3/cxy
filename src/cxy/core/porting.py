@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -21,7 +21,7 @@ import tomlkit
 from cxy.core import closure, pipeline, testing, tools
 from cxy.core import manifest as manifests
 from cxy.core.errors import CxyError
-from cxy.core.manifest import STANDARDS, Layout, Manifest, OptionValue
+from cxy.core.manifest import STANDARDS, Kind, Layout, Manifest, OptionValue
 from cxy.core.pipeline import BuildOptions
 from cxy.core.project import Project, Sources
 
@@ -94,6 +94,12 @@ class Target:
 
     inherited: tuple[str, ...] = ()
     """Definitions, options and libraries from the targets it links, such as packages."""
+
+    links: tuple[str, ...] = ()
+    """The project's targets that it depends on."""
+
+    received: tuple[str, ...] = ()
+    """Definitions from the project's own libraries that it links."""
 
     standard: int | None = None
     standard_is_explicit: bool = False
@@ -191,6 +197,12 @@ def port(root: Path, options: BuildOptions, *, dry_run: bool = False, force: boo
         print(text, end="", flush=True)
     if dry_run:
         return
+    try:
+        manifests.parse(text)
+    except CxyError as error:
+        raise CxyError(
+            f"cxy cannot describe this project, so {manifests.FILENAME} was not written: {error}"
+        ) from error
     if findings.problems and not force:
         problems = tools.count(len(findings.problems), "problem")
         raise CxyError(
@@ -445,12 +457,15 @@ def read_cmake(
     configuration = codemodel["configurations"][0]
     project = next(p for p in configuration["projects"] if "parentIndex" not in p)
     entries = {entry["name"]: entry for entry in cache["entries"]}
+    names = {summary["id"]: summary["name"] for summary in configuration["targets"]}
     targets = []
     for summary in configuration["targets"]:
         data = _json(reply / summary["jsonFile"])
         if data["type"] == "UTILITY" or data.get("isGeneratorProvided"):
             continue
-        targets.append(_target(data, project_path, lambda text: _built(text, build)))
+        target = _target(data, project_path, lambda text: _built(text, build))
+        links = (names[d["id"]] for d in data.get("dependencies", []) if d.get("id") in names)
+        targets.append(replace(target, links=tuple(links)))
 
     mentions = False
     for item in inputs:
@@ -617,21 +632,35 @@ def propose(
             findings.problems.append(f"{target.name} compiles C, which cxy cannot build yet")
         targets.append(target)
 
+    targets = _received(targets, findings)
     default = Project(root, Manifest(name=name, version=version))
     tests = [t for t in targets if t.kind == "EXECUTABLE" and _is_test(default, t)]
     libraries = [t for t in targets if t.kind in _LIBRARIES and t.sources]
     programs = [t for t in targets if t.kind == "EXECUTABLE" and t not in tests]
-    library = _only(libraries, "libraries", "one library", findings)
-    program = _only(programs, "programs", "one application", findings)
-    if library is not None and library.kind not in ("STATIC_LIBRARY", "SHARED_LIBRARY"):
-        findings.warnings.append(f"cxy builds {library.name} as a static library")
+    for library in libraries:
+        if library.kind not in ("STATIC_LIBRARY", "SHARED_LIBRARY"):
+            findings.warnings.append(f"cxy builds {library.name} as a static library")
 
-    layout = _layout(library, program, tests, targets, default.manifest.layout, findings)
-    std = _standard(cmake, [*filter(None, [library, program]), *tests], findings)
-    if program is not None and program.file_name:
-        built = PurePosixPath(program.file_name).stem
-        if built != name:
-            findings.warnings.append(f"cxy names the program {name}, not {built}")
+    tables: dict[str, dict[str, Any]] = {}
+    if len(libraries) > 1 or len(programs) > 1:
+        layout, tables, mapped = _components(
+            root, libraries, programs, tests, default.manifest.layout, findings
+        )
+    else:
+        library = libraries[0] if libraries else None
+        program = programs[0] if programs else None
+        layout = _layout(library, program, tests, targets, default.manifest.layout, findings)
+        mapped = []
+        if library is not None:
+            mapped.append(Mapped(library, Kind.LIBRARY, name))
+        if program is not None:
+            mapped.append(Mapped(program, Kind.PROGRAM, name, (name,) if library else ()))
+    std = _standard(cmake, [*(m.target for m in mapped), *tests], findings)
+    for item in mapped:
+        if item.kind is Kind.PROGRAM and item.target.file_name:
+            built = PurePosixPath(item.target.file_name).stem
+            if built != item.name:
+                findings.warnings.append(f"cxy names the program {item.name}, not {built}")
     if cmake.options:
         listed = ", ".join(f"{k}={v}" for k, v in sorted(cmake.options.items()))
         findings.warnings.append(
@@ -639,10 +668,13 @@ def propose(
         )
 
     document = _document(name, version, std, recipe, layout)
+    for section, named in tables.items():
+        document[section] = named
     try:
         manifest = manifests.parse(tomlkit.dumps(document))
     except CxyError as error:
-        raise CxyError(f"the proposed {manifests.FILENAME} is invalid: {error}") from error
+        findings.problems.append(f"cxy cannot describe the project this way: {error}")
+        return tomlkit.dumps(document)
     project = Project(root, manifest)
     try:
         sources = project.sources()
@@ -650,12 +682,12 @@ def propose(
         findings.problems.append(str(error))
         return tomlkit.dumps(document)
 
-    separate = _compare(project, sources, library, program, tests, findings)
+    separate = _compare(project, sources, mapped, tests, findings)
     if separate:
         document["test"] = {"separate": True}
     _check_frameworks(project, sources, document, findings)
-    objects = any(found.sources for found in sources.programs)
-    _carry_settings(project, library, program, tests, objects, document, findings)
+    objects = {f.component.name for f in sources.programs if f.sources}
+    _carry_settings(project, mapped, tests, objects, document, bool(tables), findings)
     _check_inherited([t for t in targets if t.sources], provided or Provided(), findings)
     text = tomlkit.dumps(document)
     try:
@@ -663,6 +695,32 @@ def propose(
     except CxyError as error:
         raise CxyError(f"the proposed {manifests.FILENAME} is invalid: {error}") from error
     return text
+
+
+def _received(targets: Sequence[Target], findings: Findings) -> list[Target]:
+    """Set apart what targets get from the project's own libraries, rather than from outside."""
+    by_name = {target.name: target for target in targets}
+    result = []
+    for target in targets:
+        linked: set[str] = set()
+        pending = list(target.links)
+        while pending:
+            name = pending.pop()
+            if name in by_name and name not in linked:
+                linked.add(name)
+                pending += by_name[name].links
+        definitions = {d for name in linked for d in by_name[name].definitions}
+        flags = {f: name for name in sorted(linked) for f in by_name[name].flags}
+        received = [i[2:] for i in target.inherited if i.startswith("-D") and i[2:] in definitions]
+        for item in target.inherited:
+            if item in flags:
+                findings.problems.append(
+                    f"{target.name} is compiled with {item} from {flags[item]}, but cxy passes a "
+                    "library's options on to nothing else"
+                )
+        inherited = tuple(i for i in target.inherited if i not in flags and i[2:] not in received)
+        result.append(replace(target, inherited=inherited, received=tuple(received)))
+    return result
 
 
 def _package_name(text: str) -> str:
@@ -684,13 +742,115 @@ def _is_test(project: Project, target: Target) -> bool:
     ) or any(testing.detect(project, source) for source in target.sources)
 
 
-def _only(targets: Sequence[Target], plural: str, limit: str, findings: Findings) -> Target | None:
-    if len(targets) > 1:
-        findings.problems.append(
-            f"the project builds {len(targets)} {plural} "
-            f"({', '.join(t.name for t in targets)}), but cxy builds {limit}"
-        )
-    return targets[0] if targets else None
+@dataclass(frozen=True)
+class Mapped:
+    """A CMake target, and the component that cxy builds instead."""
+
+    target: Target
+    kind: Kind
+    name: str
+    uses: tuple[str, ...] = ()
+
+
+_MAIN = re.compile(r"\bint\s+main\s*\(")
+
+
+def _components(
+    root: Path,
+    libraries: Sequence[Target],
+    programs: Sequence[Target],
+    tests: Sequence[Target],
+    default: Layout,
+    findings: Findings,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]], list[Mapped]]:
+    """Describe several libraries and programs in [lib.NAME] and [bin.NAME] tables.
+
+    Return the layout settings, the tables, and which target each describes.
+    """
+    names: dict[str, str] = {}
+    for target in (*libraries, *programs):
+        base = _package_name(target.name)
+        name, number = base, 2
+        while name in names.values():
+            name, number = f"{base}-{number}", number + 1
+        names[target.name] = name
+    by_name = {t.name: t for t in libraries}
+
+    def uses(target: Target) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(names[link] for link in target.links if link in by_name))
+
+    publics: dict[str, str] = {}
+
+    def public(target: Target, visiting: tuple[str, ...] = ()) -> str:
+        """Its public include directory: one that the libraries it uses do not provide."""
+        if target.name in publics:
+            return publics[target.name]
+        own = _common(target.sources) or "."
+        provided: set[str] = set()
+        for link in target.links:
+            if link in by_name and link not in visiting:
+                used = by_name[link]
+                provided |= {public(used, (*visiting, target.name)), _common(used.sources) or "."}
+        candidates = [i for i in target.includes if i != own and i not in provided]
+        if len(candidates) > 1:
+            findings.problems.append(
+                f"{target.name} uses several include directories ({', '.join(candidates)}), but "
+                f"cxy gives a library one: {candidates[0]}"
+            )
+        publics[target.name] = candidates[0] if candidates else own
+        return publics[target.name]
+
+    lib: dict[str, Any] = {}
+    mapped = []
+    for target in libraries:
+        name = names[target.name]
+        own = _common(target.sources) or "."
+        table: dict[str, Any] = {"sources": own}
+        if (include := public(target)) != own:
+            table["include"] = include
+        if used := uses(target):
+            table["uses"] = list(used)
+        if target.kind == "SHARED_LIBRARY":
+            table["shared"] = True
+        lib[name] = table
+        mapped.append(Mapped(target, Kind.LIBRARY, name, used))
+
+    bins: dict[str, Any] = {}
+    every = tuple(names[t.name] for t in libraries)
+    for target in programs:
+        name = names[target.name]
+        mains = [s for s in target.sources if PurePosixPath(s).stem == "main"]
+        if len(mains) != 1:
+            mains = [
+                s
+                for s in target.sources
+                if _MAIN.search((root / s).read_text(encoding="utf-8", errors="replace"))
+            ]
+        if len(mains) != 1:
+            findings.problems.append(
+                f"cannot tell which file of {target.name} has main(): {', '.join(target.sources)}"
+            )
+            continue
+        main = mains[0]
+        others = [s for s in target.sources if s != main]
+        table = {}
+        directory = _common(others) if others else None
+        if directory is not None:
+            table["sources"] = directory
+        if directory is None or PurePosixPath(main) != PurePosixPath(directory, "main.cpp"):
+            table["main"] = main
+        used = uses(target)
+        if set(used) != set(every):
+            table["uses"] = list(used)
+        bins[name] = table
+        mapped.append(Mapped(target, Kind.PROGRAM, name, used if "uses" in table else every))
+
+    layout = {}
+    tests_dir = _tests_dir(libraries, tests, default)
+    if tests_dir is not None and tests_dir not in (default.tests, "."):
+        layout["tests"] = tests_dir
+    tables = {key: value for key, value in (("lib", lib), ("bin", bins)) if value}
+    return layout, tables, mapped
 
 
 def _common(paths: Iterable[str]) -> str | None:
@@ -727,19 +887,7 @@ def _layout(
                 f"{program.name} is built from {', '.join(program.sources)}"
             )
 
-    beside = [
-        source
-        for target in tests
-        for source in target.sources
-        if any(fnmatchcase(PurePosixPath(source).name, p) for p in default.test_patterns)
-    ]
-    others = [
-        source
-        for target in tests
-        for source in target.sources
-        if source not in beside and (library is None or source not in library.sources)
-    ]
-    tests_dir = _common(others)
+    tests_dir = _tests_dir([library] if library else [], tests, default)
     if tests_dir is not None and tests_dir not in (default.tests, "."):
         layout["tests"] = tests_dir
 
@@ -763,6 +911,19 @@ def _layout(
         layout["include"] = include_dir
 
     return layout
+
+
+def _tests_dir(libraries: Sequence[Target], tests: Sequence[Target], default: Layout) -> str | None:
+    """The directory of the tests that are not beside the code they test."""
+    compiled = {source for library in libraries for source in library.sources}
+    others = [
+        source
+        for target in tests
+        for source in target.sources
+        if source not in compiled
+        and not any(fnmatchcase(PurePosixPath(source).name, p) for p in default.test_patterns)
+    ]
+    return _common(others)
 
 
 def _standard(cmake: CMakeProject, targets: Sequence[Target], findings: Findings) -> int:
@@ -821,16 +982,24 @@ def _requirement(requirement: Requirement) -> Any:
 def _compare(
     project: Project,
     sources: Sources,
-    library: Target | None,
-    program: Target | None,
+    mapped: Sequence[Mapped],
     tests: Sequence[Target],
     findings: Findings,
 ) -> bool:
     """Report files that cxy would build differently, and return whether tests are separate."""
     tests_dir = project.manifest.layout.tests
-    built = {*(library.sources if library else ()), *(program.sources if program else ())}
-    ours = {*sources.compiled, *(found.main for found in sources.programs if found.main)}
-    _differences(built, ours, "the library and application", findings.problems)
+    found = {(f.component.kind, f.component.name): f for f in sources.components}
+    built: set[str] = set()
+    for item in mapped:
+        built |= set(item.target.sources)
+        ours: set[str] = set()
+        if (component := found.pop((item.kind, item.name), None)) is not None:
+            ours = {*component.sources, *([component.main] if component.main else [])}
+        _differences(set(item.target.sources), ours, item.target.name, findings.problems)
+    for component in found.values():
+        if files := {*component.sources, *([component.main] if component.main else [])}:
+            what = "a library or program that CMake does not build"
+            _differences(set(), files, what, findings.problems)
 
     tested = {source for target in tests for source in target.sources} - built
     _differences(tested, {*sources.unit_tests, *sources.tests}, "the tests", findings.warnings)
@@ -901,20 +1070,20 @@ def _check_frameworks(
 
 def _carry_settings(
     project: Project,
-    library: Target | None,
-    program: Target | None,
+    mapped: Sequence[Mapped],
     tests: Sequence[Target],
-    objects: bool,
+    objects: set[str],
     document: tomlkit.TOMLDocument,
+    named: bool,
     findings: Findings,
 ) -> None:
     """Carry the definitions and options that the project sets into the manifest.
 
     cxy gives every target the [build] settings, and passes a library's definitions on to
-    whatever links it: the program and the tests. The program's reach the tests that link
-    its objects. ``objects`` is whether there are any.
+    whatever uses it, and to the tests. A program's reach the tests if they link its
+    ``objects``.
     """
-    everything = [t for t in (library, program, *tests) if t is not None]
+    everything = [*(item.target for item in mapped), *tests]
     if not everything:
         return
     for target in everything:
@@ -932,24 +1101,46 @@ def _carry_settings(
 
     build_defines = [d for d in common([t.definitions for t in everything]) if d in usable]
     build_flags = common([t.flags for t in everything])
-    lib_defines, lib_flags, bin_defines, bin_flags = [], [], [], []
-    if library is not None:
-        lib_defines = [d for d in library.definitions if d in usable and d not in build_defines]
-        lib_flags = [f for f in library.flags if f not in build_flags]
-    if program is not None:
-        bin_defines = [d for d in program.definitions if d in usable and d not in build_defines]
-        bin_flags = [f for f in program.flags if f not in build_flags]
+    items = {item.target.name: item for item in mapped}
+    defines = {
+        name: [d for d in item.target.definitions if d in usable and d not in build_defines]
+        for name, item in items.items()
+    }
+    flags = {
+        name: [f for f in item.target.flags if f not in build_flags] for name, item in items.items()
+    }
+    libraries = {item.name: item for item in mapped if item.kind is Kind.LIBRARY}
+
+    def reached(names: Iterable[str]) -> set[str]:
+        """The libraries used, directly or not."""
+        found: set[str] = set()
+        pending = list(names)
+        while pending:
+            name = pending.pop()
+            if name in libraries and name not in found:
+                found.add(name)
+                pending += libraries[name].uses
+        return found
+
+    def given(target: Target) -> set[str]:
+        """The definitions that cxy would compile a target with."""
+        result = set(build_defines)
+        item = items.get(target.name)
+        if item is None:  # A test links every library, and the programs' objects.
+            used = set(libraries)
+            for program in mapped:
+                if program.kind is Kind.PROGRAM and program.name in objects:
+                    result |= set(defines[program.target.name])
+        else:
+            result |= set(defines[target.name])
+            used = reached(item.uses)
+        for name in used:
+            result |= set(defines[libraries[name].target.name])
+        return result
 
     dropped: dict[tuple[str, bool], list[str]] = {}
     for target in everything:
-        given = {*build_defines, *lib_defines}
-        flags = set(build_flags)
-        if target is library:
-            flags |= set(lib_flags)
-        if target is program or (target in tests and objects):
-            given |= set(bin_defines)
-        if target is program:
-            flags |= set(bin_flags)
+        allowed = {*build_flags, *flags.get(target.name, [])}
         files = _compiled_files(project, target.sources)
 
         def uses(definition: str, files: Mapping[str, str] = files) -> bool:
@@ -957,15 +1148,17 @@ def _carry_settings(
             pattern = re.compile(rf"\b{re.escape(macro)}\b")
             return any(pattern.search(text) for text in files.values())
 
-        for definition in sorted(given - set(target.definitions)):
+        cxy_defines = given(target)
+        cmake_defines = {*target.definitions, *target.received}
+        for definition in sorted(cxy_defines - cmake_defines):
             if uses(definition):
                 findings.problems.append(
                     f"cxy would also compile {target.name} with -D{definition}, which it uses"
                 )
         for definition in target.definitions:
-            if definition in usable and definition not in given:
+            if definition in usable and definition not in cxy_defines:
                 dropped.setdefault((definition, uses(definition)), []).append(target.name)
-        if extra := [f for f in target.flags if f not in flags]:
+        if extra := [f for f in target.flags if f not in allowed]:
             findings.problems.append(
                 f"{target.name} is compiled with options cxy cannot set for it: {' '.join(extra)}"
             )
@@ -978,20 +1171,27 @@ def _carry_settings(
         else:
             findings.warnings.append(f"{message}; nothing they compile uses it, so it is left out")
 
-    for section, defines, flags, extra in (
-        ("build", build_defines, build_flags, {}),
-        ("lib", lib_defines, lib_flags, {"shared": True} if _is_shared(library) else {}),
-        ("bin", bin_defines, bin_flags, {}),
-    ):
-        table = {**extra, **({"defines": defines} if defines else {})}
-        if flags:
-            table["flags"] = flags
+    def settings(item_defines: list[str], item_flags: list[str]) -> dict[str, Any]:
+        table: dict[str, Any] = {}
+        if item_defines:
+            table["defines"] = item_defines
+        if item_flags:
+            table["flags"] = item_flags
+        return table
+
+    if table := settings(build_defines, build_flags):
+        document["build"] = table
+    for item in mapped:
+        table = settings(defines[item.target.name], flags[item.target.name])
+        section = "lib" if item.kind is Kind.LIBRARY else "bin"
+        if named:
+            existing: Any = document[section]
+            existing[item.name].update(table)
+            continue
+        if item.kind is Kind.LIBRARY and item.target.kind == "SHARED_LIBRARY":
+            table = {"shared": True, **table}
         if table:
             document[section] = table
-
-
-def _is_shared(library: Target | None) -> bool:
-    return library is not None and library.kind == "SHARED_LIBRARY"
 
 
 def _check_inherited(targets: Sequence[Target], provided: Provided, findings: Findings) -> None:

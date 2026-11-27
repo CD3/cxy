@@ -7,7 +7,7 @@ from cxy.core import cmake, conan
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.manifest import parse
-from cxy.core.project import Sources
+from cxy.core.project import ComponentSources, Sources
 from cxy.core.stamp import Stamp, write_if_changed
 from cxy.core.testing import plan_programs
 
@@ -154,11 +154,11 @@ def test_others_choose_whether_the_library_is_shared(shared):
     default = "ON" if shared else "OFF"
     assert f'option(BUILD_SHARED_LIBS "Build shared libraries" {default})' in exported
     assert "add_library(app_lib\n" in exported
-    recipe = conan.conanfile(manifest, standalone=True, compiled=True)
+    recipe = conan.conanfile(manifest, standalone=True, shared=cmake.shared_default(sources))
     assert 'options = {"shared": [True, False]}' in recipe
     assert f"'shared': {shared}," in recipe
     assert "shared" not in conan.conanfile(manifest, standalone=True)
-    assert "shared" not in conan.conanfile(manifest, compiled=True)
+    assert "shared" not in conan.conanfile(manifest, shared=True)
 
 
 @pytest.mark.parametrize(
@@ -218,3 +218,49 @@ def test_writes_line_endings_unchanged(tmp_path):
         assert write_if_changed(path, text)
         assert path.read_bytes() == text.encode()
         assert not write_if_changed(path, text)
+
+
+def test_libraries_of_different_kinds():
+    manifest = parse(
+        """
+[package]
+name = "app"
+version = "1.0"
+[lib.core]
+sources = "core"
+[lib.text]
+sources = "text"
+uses = ["core"]
+shared = true
+[bin.tool]
+main = "tool.cpp"
+uses = ["core"]
+"""
+    )
+    core, text, tool = manifest.components
+    sources = Sources(
+        (
+            ComponentSources(core, ("core/a.cpp",)),
+            ComponentSources(text, ("text/b.cpp",)),
+            ComponentSources(tool, main="tool.cpp"),
+        )
+    )
+    # Both forms name the kinds, since BUILD_SHARED_LIBS would make them alike.
+    assert cmake.shared_default(sources) is None
+    for root in (None, ".."):
+        generated = cmake.cmakelists(manifest, sources, {}, root=root)
+        assert "BUILD_SHARED_LIBS" not in generated
+        assert "add_library(core_lib STATIC" in generated
+        assert "OUTPUT_NAME core POSITION_INDEPENDENT_CODE ON" in generated
+        assert "add_library(text_lib SHARED" in generated
+        assert "target_link_libraries(text_lib PUBLIC core_lib)" in generated
+        assert "target_link_libraries(tool PRIVATE core_lib)" in generated
+    assert "shared" not in conan.conanfile(manifest, standalone=True, shared=None)
+
+
+def test_missing_component_files():
+    manifest = parse('[package]\nname = "app"\nversion = "1.0"\n[bin.tool]\nmain = "tool.cpp"\n')
+    library, tool = manifest.components
+    sources = Sources((ComponentSources(library, ("lib/a.cpp",)), ComponentSources(tool)))
+    with pytest.raises(CxyError, match=r"bin\.tool: no tool\.cpp"):
+        cmake.cmakelists(manifest, sources, {})

@@ -153,20 +153,11 @@ def test_headers_beside_sources(tmp_path):
 
 
 def test_what_cxy_cannot_build(tmp_path):
-    write(
-        tmp_path,
-        {
-            "lib/a.cpp": "",
-            "lib/b.cpp": "",
-            "lib/unused.cpp": "",
-            "src/app.cpp": "",
-        },
-    )
+    write(tmp_path, {"lib/a.cpp": "", "lib/unused.cpp": "", "src/app.cpp": ""})
     _, findings = propose(
         tmp_path,
         [
             Target("a", "STATIC_LIBRARY", sources=("lib/a.cpp",)),
-            Target("b", "STATIC_LIBRARY", sources=("lib/b.cpp",)),
             Target("app", "EXECUTABLE", sources=("src/app.cpp",)),
             Target("vendored", "STATIC_LIBRARY", foreign=("/elsewhere/x.cpp",)),
         ],
@@ -174,9 +165,29 @@ def test_what_cxy_cannot_build(tmp_path):
     )
     problems = "\n".join(findings.problems)
     assert "vendored is built from files that are generated or outside" in problems
-    assert "builds 2 libraries (a, b)" in problems
     assert "main() in a file named main.cpp" in problems
     assert "would also compile" in problems and "lib/unused.cpp" in problems
+
+
+def test_libraries_in_one_directory(tmp_path):
+    write(tmp_path, {"lib/a.cpp": "", "lib/b.cpp": ""})
+    findings = Findings()
+    porting.propose(
+        tmp_path,
+        Recipe(),
+        CMakeProject(
+            "Demo",
+            "1.0",
+            (
+                Target("a", "STATIC_LIBRARY", sources=("lib/a.cpp",)),
+                Target("b", "STATIC_LIBRARY", sources=("lib/b.cpp",)),
+            ),
+        ),
+        findings,
+    )
+    assert findings.problems == [
+        "cxy cannot describe the project this way: lib.a and lib.b have the same sources directory"
+    ]
 
 
 def test_what_conan_does_not_provide(tmp_path):
@@ -429,3 +440,103 @@ def test_settings_cxy_would_add(tmp_path):
         "cxy cannot set -DF(x)=x, which is not NAME or NAME=value",
         "cxy would also compile demo with -DFAST, which it uses",
     ]
+
+
+def test_several_libraries_and_programs(tmp_path):
+    write(
+        tmp_path,
+        {
+            "core/core.cpp": "",
+            "core/core.hpp": "",
+            "include/text/text.hpp": "",
+            "text/text.cpp": "",
+            "apps/shout/main.cpp": "",
+            "apps/shout/loud.cpp": "",
+            "tools/count.cpp": "int main() {}\n",
+            "tests/all.cpp": GTEST,
+        },
+    )
+    manifest, findings = propose(
+        tmp_path,
+        [
+            Target("core", "STATIC_LIBRARY", sources=("core/core.cpp",), includes=("core",)),
+            Target(
+                "Text",
+                "SHARED_LIBRARY",
+                sources=("text/text.cpp",),
+                includes=("include", "core"),
+                links=("core",),
+            ),
+            Target(
+                "shout",
+                "EXECUTABLE",
+                "shout",
+                ("apps/shout/main.cpp", "apps/shout/loud.cpp"),
+                links=("core", "Text"),
+            ),
+            Target("count", "EXECUTABLE", "count", ("tools/count.cpp",), links=("core",)),
+            Target("tests", "EXECUTABLE", sources=("tests/all.cpp",), links=("core", "Text")),
+        ],
+    )
+    assert findings.problems == []
+    core, text, shout, count = manifest.components
+    assert (core.name, core.directory, core.include, core.uses) == ("core", "core", "core", ())
+    assert (text.name, text.include, text.uses, text.shared) == ("text", "include", ("core",), True)
+    assert (shout.directory, shout.main, shout.uses) == (
+        "apps/shout",
+        "apps/shout/main",
+        ("core", "text"),
+    )
+    assert (count.directory, count.main, count.uses) == (None, "tools/count.cpp", ("core",))
+
+
+MULTI_CMAKELISTS = """\
+cmake_minimum_required(VERSION 3.17)
+project(Multi VERSION 2.0.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+find_package(Catch2 REQUIRED)
+add_library(core STATIC core/core.cpp)
+target_include_directories(core PUBLIC core)
+add_library(text SHARED text/text.cpp)
+set_target_properties(text PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_include_directories(text PUBLIC text)
+target_link_libraries(text PUBLIC core)
+target_compile_definitions(text PUBLIC TEXT_API=1)
+add_executable(shout apps/shout/main.cpp apps/shout/loud.cpp)
+target_include_directories(shout PRIVATE apps/shout)
+target_link_libraries(shout PRIVATE text)
+add_executable(count tools/count.cpp)
+target_link_libraries(count PRIVATE core)
+include(CTest)
+add_executable(core_test core/core_test.cpp)
+target_link_libraries(core_test PRIVATE core Catch2::Catch2WithMain)
+add_executable(all_tests tests/all.cpp apps/shout/loud.cpp)
+target_include_directories(all_tests PRIVATE apps/shout)
+target_link_libraries(all_tests PRIVATE text Catch2::Catch2WithMain)
+"""
+
+
+@pytest.mark.e2e
+def test_port_several_libraries_and_programs(tmp_path):
+    from test_cli import COMPONENTS
+
+    files = {name: text for name, text in COMPONENTS.items() if name != "cxy.toml"}
+    files["CMakeLists.txt"] = MULTI_CMAKELISTS
+    files["conanfile.txt"] = "[test_requires]\ncatch2/3.7.1\n"
+    write(tmp_path, files)
+
+    result = cxy("port", cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = manifests.load(tmp_path / "cxy.toml")
+    assert {(c.kind.value, c.name) for c in manifest.components} == {
+        ("library", "core"),
+        ("library", "text"),
+        ("program", "shout"),
+        ("program", "count"),
+    }
+    run = cxy("run", "--bin", "shout", cwd=tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == "ANSWER=42"
+    test = cxy("test", cwd=tmp_path)
+    assert test.returncode == 0, test.stdout + test.stderr

@@ -2,7 +2,7 @@
 
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -21,6 +21,8 @@ _CONAN_NAME = re.compile(r"[a-z0-9_][a-z0-9_+.-]+")
 _DEFINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL)
 
 OptionValue = str | bool | int
+SOURCE_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++"}
+HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 
 
 @dataclass(frozen=True)
@@ -73,12 +75,13 @@ class Component:
 
     name: str
     kind: Kind
-    directory: str
-    """Its sources and private headers."""
+    directory: str | None
+    """Its sources and private headers. A program may have only a main file."""
     include: str | None = None
     """A library's public headers."""
     main: str | None = None
-    """A program's main file, without its suffix, which may be that of any source."""
+    """A program's main file. Without a suffix, it may have that of any source, and must be in
+    the program's directory."""
     uses: tuple[str, ...] = ()
     """The libraries that it links."""
     settings: Settings = Settings()
@@ -93,6 +96,21 @@ class Component:
     def objects(self) -> str:
         """The target for a program's sources apart from its main file, which tests link."""
         return f"{self.name}_app"
+
+    @property
+    def where(self) -> str:
+        """Where it is described in cxy.toml."""
+        return f"{'lib' if self.kind is Kind.LIBRARY else 'bin'}.{self.name}"
+
+    def is_main(self, path: PurePosixPath, owned: bool) -> bool:
+        """Whether a file is this program's main file. ``owned`` is whether it is in the
+        program's directory, rather than a deeper one of another component."""
+        if self.main is None:
+            return False
+        main = PurePosixPath(self.main)
+        if main.suffix in SOURCE_SUFFIXES:
+            return path == main
+        return owned and path.suffix in SOURCE_SUFFIXES and path.with_suffix("") == main
 
 
 @dataclass(frozen=True)
@@ -119,13 +137,19 @@ class Manifest:
     build: Settings = Settings()
     """Settings for everything the project compiles, tests included."""
     library: LibrarySettings = LibrarySettings()
+    """Settings for the library that [layout] describes."""
     program: Settings = Settings()
+    """Settings for the program that [layout] describes."""
+    libraries: tuple[Component, ...] = ()
+    """Those in [lib.NAME] tables, which replace the one that [layout] describes."""
+    programs: tuple[Component, ...] = ()
+    """Those in [bin.NAME] tables, which replace the one that [layout] describes."""
 
     @property
     def components(self) -> tuple[Component, ...]:
-        """The libraries, then the programs. [layout] describes one of each."""
+        """The libraries, then the programs."""
         layout = self.layout
-        return (
+        libraries = self.libraries or (
             Component(
                 self.name,
                 Kind.LIBRARY,
@@ -134,22 +158,25 @@ class Manifest:
                 settings=Settings(self.library.defines, self.library.flags),
                 shared=self.library.shared,
             ),
+        )
+        programs = self.programs or (
             Component(
                 self.name,
                 Kind.PROGRAM,
                 layout.src,
                 main=PurePosixPath(layout.src, "main").as_posix(),
-                uses=(self.name,),
+                uses=tuple(library.name for library in libraries),
                 settings=self.program,
             ),
         )
+        return (*libraries, *programs)
 
     @property
     def include_directories(self) -> tuple[str, ...]:
         """Where the project's own includes are found, after the including file's directory."""
         components = self.components
         public = (c.include for c in components if c.include is not None)
-        return (*public, *(c.directory for c in components))
+        return (*public, *(c.directory for c in components if c.directory is not None))
 
 
 def load(path: Path) -> Manifest:
@@ -204,22 +231,29 @@ def parse(text: str) -> Manifest:
                 f"{dependency.name!r} is a direct dependency, so it cannot be in [overrides]; "
                 "set its version there and add force = true"
             )
-    return Manifest(
+    layout = _layout(_table(data, "layout"))
+    library, libraries = _libraries(_table(data, "lib"), layout)
+    program, programs = _programs(_table(data, "bin"), layout, libraries or (name,))
+    manifest = Manifest(
         name=name,
         version=_string(package.get("version"), "package.version"),
         std=std,
         dependencies=dependencies,
         dev_dependencies=dev_dependencies,
         overrides=overrides,
-        layout=_layout(_table(data, "layout")),
+        layout=layout,
         test_framework=_test_framework(_table(data, "test")),
         test_working_directory=_test_working_directory(_table(data, "test")),
         test_separate=_boolean(_table(data, "test").get("separate", False), "test.separate"),
         tools=_tools(_table(data, "tools")),
-        build=Settings(**_settings(_table(data, "build"), "build")),
-        library=LibrarySettings(**_settings(_table(data, "lib"), "lib", frozenset({"shared"}))),
-        program=Settings(**_settings(_table(data, "bin"), "bin")),
+        build=_settings(_table(data, "build"), "build", known=True),
+        library=library,
+        program=program,
+        libraries=libraries,
+        programs=programs,
     )
+    _check_components(manifest.components)
+    return manifest
 
 
 def is_definition(text: str) -> bool:
@@ -270,10 +304,9 @@ def _dependency(name: str, value: Any, where: str) -> Dependency:
     )
 
 
-def _settings(
-    table: Mapping[str, Any], where: str, extra: frozenset[str] = frozenset()
-) -> dict[str, Any]:
-    _known(table, {"defines", "flags", *extra}, f"[{where}]")
+def _settings(table: Mapping[str, Any], where: str, known: bool = False) -> Settings:
+    if known:
+        _known(table, {"defines", "flags"}, f"[{where}]")
     defines = _strings(table.get("defines", []), f"{where}.defines")
     for define in defines:
         if not is_definition(define):
@@ -282,10 +315,150 @@ def _settings(
     for flag in flags:
         if flag.startswith(("-D", "/D")):
             raise CxyError(f"{where}.flags: put {flag!r} in {where}.defines, without -D")
-    values: dict[str, Any] = {"defines": defines, "flags": flags}
-    for key in extra & table.keys():
-        values[key] = _boolean(table[key], f"{where}.{key}")
-    return values
+    return Settings(defines, flags)
+
+
+def _named(table: Mapping[str, Any], where: str) -> dict[str, dict[str, Any]] | None:
+    """Return the named components in a table, or None if it holds settings."""
+    named = {key: value for key, value in table.items() if isinstance(value, dict)}
+    if not named:
+        return None
+    if len(named) != len(table):
+        example = next(iter(named))
+        raise CxyError(
+            f"[{where}] holds either settings or named components such as "
+            f"[{where}.{example}], not both"
+        )
+    for name in named:
+        if not _PACKAGE_NAME.fullmatch(name) or name in RESERVED_NAMES:
+            raise CxyError(
+                f"invalid name {where}.{name}: use lowercase letters, digits, '-' and '_', "
+                "starting with a letter"
+            )
+    return named
+
+
+def _libraries(
+    table: Mapping[str, Any], layout: Layout
+) -> tuple[LibrarySettings, tuple[Component, ...]]:
+    named = _named(table, "lib")
+    if named is None:
+        _known(table, {"defines", "flags", "shared"}, "[lib]")
+        settings = _settings(table, "lib")
+        shared = _boolean(table.get("shared", False), "lib.shared")
+        return LibrarySettings(settings.defines, settings.flags, shared), ()
+    libraries = []
+    for name, value in named.items():
+        where = f"lib.{name}"
+        _known(value, {"sources", "include", "uses", "shared", "defines", "flags"}, f"[{where}]")
+        if "sources" not in value:
+            raise CxyError(f"{where}.sources is required: the directory with the library's files")
+        directory = _directory(value["sources"], f"{where}.sources", layout)
+        include = directory
+        if "include" in value:
+            include = _directory(value["include"], f"{where}.include", layout)
+        libraries.append(
+            Component(
+                name,
+                Kind.LIBRARY,
+                directory,
+                include=include,
+                uses=_strings(value.get("uses", []), f"{where}.uses"),
+                settings=_settings(value, where),
+                shared=_boolean(value.get("shared", False), f"{where}.shared"),
+            )
+        )
+    return LibrarySettings(), tuple(libraries)
+
+
+def _programs(
+    table: Mapping[str, Any], layout: Layout, libraries: Sequence[Component | str]
+) -> tuple[Settings, tuple[Component, ...]]:
+    named = _named(table, "bin")
+    if named is None:
+        return _settings(table, "bin", known=True), ()
+    names = tuple(lib if isinstance(lib, str) else lib.name for lib in libraries)
+    programs = []
+    for name, value in named.items():
+        where = f"bin.{name}"
+        _known(value, {"sources", "main", "uses", "defines", "flags"}, f"[{where}]")
+        directory = None
+        if "sources" in value:
+            directory = _directory(value["sources"], f"{where}.sources", layout)
+        if "main" in value:
+            main = _inside(value["main"], f"{where}.main")
+            if PurePosixPath(main).suffix not in SOURCE_SUFFIXES:
+                raise CxyError(f"{where}.main must be a C++ source file")
+        elif directory is not None:
+            main = PurePosixPath(directory, "main").as_posix()
+        else:
+            raise CxyError(
+                f"{where} needs main, the file with main(), or sources, a directory with main.cpp"
+            )
+        uses = _strings(value["uses"], f"{where}.uses") if "uses" in value else names
+        programs.append(
+            Component(
+                name,
+                Kind.PROGRAM,
+                directory,
+                main=main,
+                uses=uses,
+                settings=_settings(value, where),
+            )
+        )
+    return Settings(), tuple(programs)
+
+
+def _directory(value: Any, where: str, layout: Layout) -> str:
+    directory = _inside(value, where)
+    build = PurePosixPath(layout.build)
+    if PurePosixPath(directory).is_relative_to(build):
+        raise CxyError(f"{where} cannot be inside layout.build")
+    if directory != "." and build.is_relative_to(directory):
+        raise CxyError(f"layout.build cannot be inside {where}")
+    return directory
+
+
+def _check_components(components: Sequence[Component]) -> None:
+    libraries = {c.name: c for c in components if c.kind is Kind.LIBRARY}
+    for component in components:
+        for used in component.uses:
+            if used not in libraries:
+                raise CxyError(f"{component.where}.uses: there is no library called {used!r}")
+            if used == component.name and component.kind is Kind.LIBRARY:
+                raise CxyError(f"{component.where}.uses: a library cannot use itself")
+
+    def visit(name: str, path: tuple[str, ...]) -> None:
+        if name in path:
+            cycle = " -> ".join((*path[path.index(name) :], name))
+            raise CxyError(f"libraries cannot use each other in a cycle: {cycle}")
+        for used in libraries[name].uses:
+            visit(used, (*path, name))
+
+    for name in libraries:
+        visit(name, ())
+
+    seen: dict[str, str] = {}
+    for component in components:
+        targets = [component.target]
+        if component.kind is Kind.PROGRAM:
+            targets.append(component.objects)
+        for target in targets:
+            if target in seen:
+                raise CxyError(
+                    f"{seen[target]} and {component.where} would both make the target {target}"
+                )
+            seen[target] = component.where
+    for kind in Kind:
+        directories: dict[str, str] = {}
+        for component in components:
+            if component.kind is kind and component.directory is not None:
+                if component.directory in directories:
+                    raise CxyError(
+                        f"{directories[component.directory]} and {component.where} have the same "
+                        "sources directory"
+                    )
+                directories[component.directory] = component.where
 
 
 def _layout(table: Mapping[str, Any]) -> Layout:

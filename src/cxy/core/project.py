@@ -8,10 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from cxy.core import manifest as manifests
 from cxy.core.errors import CxyError
-from cxy.core.manifest import Component, Kind, Manifest
-
-SOURCE_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++"}
-HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
+from cxy.core.manifest import HEADER_SUFFIXES, SOURCE_SUFFIXES, Component, Kind, Manifest
 
 
 @dataclass(frozen=True)
@@ -110,7 +107,8 @@ class Project:
             (PurePosixPath(manifest.layout.tests), None, False)
         ]
         for index, component in enumerate(components):
-            claims.append((PurePosixPath(component.directory), index, False))
+            if component.directory is not None:
+                claims.append((PurePosixPath(component.directory), index, False))
             if component.include is not None:
                 claims.append((PurePosixPath(component.include), index, True))
         found: list[list[str]] = [[] for _ in components]
@@ -120,10 +118,9 @@ class Project:
         tests: list[str] = []
         for path in self._files():
             # The deepest configured directory containing the file decides its role.
+            # A program's main file may also be outside every directory.
             matches = [claim for claim in claims if path.is_relative_to(claim[0])]
-            if not matches:
-                continue
-            depth = max(len(d.parts) for d, _, _ in matches)
+            depth = max((len(d.parts) for d, _, _ in matches), default=0)
             owners = [(index, public) for d, index, public in matches if len(d.parts) == depth]
             if path.suffix in HEADER_SUFFIXES:
                 for index, public in owners:
@@ -138,8 +135,7 @@ class Project:
                 unit_tests.append(name)
             elif (
                 program := next(
-                    (i for i in owned if components[i].main == path.with_suffix("").as_posix()),
-                    None,
+                    (i for i, c in enumerate(components) if c.is_main(path, i in owned)), None
                 )
             ) is not None:
                 if (main := mains[program]) is not None:
@@ -161,7 +157,13 @@ class Project:
         found = {path for path in self.root.iterdir() if path.is_file()}
         for top in self._tops():
             found.update(self._walk(top))
+        found.update(self.root / main for main in self._main_files())
         return sorted(found)
+
+    def _main_files(self) -> list[str]:
+        """Programs' main files, which may be outside every directory."""
+        mains = [c.main for c in self.manifest.components if c.main is not None]
+        return [m for m in mains if PurePosixPath(m).suffix and (self.root / m).is_file()]
 
     def _tops(self) -> set[str]:
         manifest = self.manifest
@@ -174,6 +176,7 @@ class Project:
             for path in self._walk(top)
             if path.suffix in SOURCE_SUFFIXES | HEADER_SUFFIXES
         }
+        found.update(map(PurePosixPath, self._main_files()))
         return sorted(found)
 
     def _walk(self, top: str) -> Iterator[Path]:

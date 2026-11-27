@@ -46,11 +46,21 @@ def build(project: Project, options: BuildOptions) -> None:
     _build(project, options, ["all"])
 
 
-def run(project: Project, options: BuildOptions, arguments: Sequence[str]) -> int:
-    programs = project.sources().programs
+def run(
+    project: Project, options: BuildOptions, arguments: Sequence[str], name: str | None = None
+) -> int:
+    programs = [found.component.name for found in project.sources().programs]
     if not programs:
+        if project.manifest.programs:
+            raise CxyError("nothing to run: no program has its main file")
         raise CxyError(f"nothing to run: no main.cpp in {project.manifest.layout.src}/")
-    target = programs[0].component.target
+    if name is None:
+        if len(programs) > 1:
+            raise CxyError(f"choose a program with --bin: {', '.join(programs)}")
+        name = programs[0]
+    elif name not in programs:
+        raise CxyError(f"no program called {name!r}; available: {', '.join(programs)}")
+    target = name
     directory = _build(project, options, [target])
     return tools.execute(_program(directory, target), arguments)
 
@@ -201,7 +211,7 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
         project.root / "conanfile.py": conan.conanfile(
             project.manifest,
             standalone=True,
-            compiled=any(found.sources for found in sources.libraries),
+            shared=cmake.shared_default(sources),
         ),
         project.root / "CMakeLists.txt": cmake.cmakelists(
             project.manifest, sources, graph, programs=testing.plan(project, sources)

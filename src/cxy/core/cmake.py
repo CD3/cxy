@@ -1,6 +1,7 @@
 """Generate CMakeLists.txt."""
 
 from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 
 from cxy.core import conan, frameworks
 from cxy.core.conan import CMakeInfo
@@ -38,9 +39,21 @@ def cmakelists(
     libraries, executables = sources.libraries, sources.programs
     if not libraries and not executables:
         raise CxyError("nothing to build: no library sources, public headers or main file found")
+    named = {*manifest.libraries, *manifest.programs}
     for found in sources.components:
-        if found.component.kind is Kind.PROGRAM and found.sources and found.main is None:
-            raise CxyError(f"{found.component.directory}/ contains sources but no main.cpp")
+        component = found.component
+        if component.kind is Kind.PROGRAM and found.sources and found.main is None:
+            raise CxyError(f"{component.directory}/ contains sources but no main.cpp")
+        if component in named and not found.exists:
+            if component.kind is Kind.LIBRARY:
+                missing = f"no sources or headers in {component.directory}/"
+            else:
+                missing = f"no {component.main}" + (
+                    "" if Path(component.main or "").suffix else ".cpp"
+                )
+            raise CxyError(f"{component.where}: {missing}")
+    # Whether those who build the exported project choose the kind of library.
+    shared = shared_default(sources) if root is None else None
 
     standard = f"cxx_std_{manifest.std}"
 
@@ -84,33 +97,48 @@ def cmakelists(
         out.append("")
     out += _find_packages(manifest.dependencies, graph)
 
+    # Static libraries that go into a shared one must be position-independent code.
+    by_name = {found.component.name: found.component for found in libraries}
+    inside_shared: set[str] = set()
+    pending = [name for c in by_name.values() if c.shared for name in c.uses]
+    while pending:
+        name = pending.pop()
+        if name in by_name and name not in inside_shared:
+            inside_shared.add(name)
+            pending += by_name[name].uses
+    if shared is not None:
+        # Others choose, for example with Conan's shared option.
+        out.append(
+            f'option(BUILD_SHARED_LIBS "Build shared libraries" {"ON" if shared else "OFF"})'
+        )
     for found in libraries:
         component = found.component
         lib, settings = component.target, component.settings
+        key = component.where if manifest.libraries else "lib"
+        assert component.directory is not None
         include_dir = path(component.include or component.directory)
         if found.sources:
-            if root is None:
-                # Others choose, for example with Conan's shared option.
-                default = "ON" if component.shared else "OFF"
-                out.append(f'option(BUILD_SHARED_LIBS "Build shared libraries" {default})')
+            if shared is not None:
                 out += _call("add_library", [lib], map(path, found.sources))
             else:
                 kind = "SHARED" if component.shared else "STATIC"
                 out += _call("add_library", [lib, kind], map(path, found.sources))
             properties = ["OUTPUT_NAME", component.name]
-            if component.shared or root is None:
+            if component.shared or shared is not None:
                 # Without exports, Visual C++ makes no import library to link against.
                 properties += ["WINDOWS_EXPORT_ALL_SYMBOLS", "ON"]
+            if component.name in inside_shared and not component.shared and shared is None:
+                properties += ["POSITION_INDEPENDENT_CODE", "ON"]
             out += _call("set_target_properties", [lib, "PROPERTIES", *properties])
             out += _call("target_include_directories", [lib, "PUBLIC", include_dir])
             out += _call("target_include_directories", [lib, "PRIVATE", path(component.directory)])
             scope = "PUBLIC"
         else:
             if component.shared:
-                raise CxyError("lib.shared needs library sources to compile, but there are none")
+                raise CxyError(f"{key}.shared needs library sources to compile, but there are none")
             if settings.flags:
                 raise CxyError(
-                    "lib.flags apply to library sources, but there are none; use build.flags"
+                    f"{key}.flags apply to library sources, but there are none; use build.flags"
                 )
             out += _call("add_library", [lib, "INTERFACE"])
             out += _call("target_include_directories", [lib, "INTERFACE", include_dir])
@@ -125,10 +153,10 @@ def cmakelists(
     objects: list[str] = []
     for found in executables:
         component = found.component
-        exe, src_dir = component.target, path(component.directory)
-        settings = component.settings
+        exe, settings = component.target, component.settings
+        src_dir = None if component.directory is None else path(component.directory)
         exe_links = links(component)
-        if found.sources:
+        if found.sources and src_dir is not None:
             # An object library lets the tests link the application's code without main().
             app = component.objects
             out += _call("add_library", [app, "OBJECT"], map(path, found.sources))
@@ -142,7 +170,8 @@ def cmakelists(
             objects.append(app)
         assert found.main is not None
         out += _call("add_executable", [exe], [path(found.main)])
-        out += _call("target_include_directories", [exe, "PRIVATE", src_dir])
+        if src_dir is not None:
+            out += _call("target_include_directories", [exe, "PRIVATE", src_dir])
         out += _call("target_compile_features", [exe, "PRIVATE", standard])
         if not found.sources:
             out += _definitions(exe, "PRIVATE", settings.defines)
@@ -150,7 +179,11 @@ def cmakelists(
         out += _link(exe, "PRIVATE", exe_links)
         out.append("")
     app_links = [*objects, *(list(library_targets.values()) or dependency_targets)]
-    private_dirs = [path(found.component.directory) for found in sources.components]
+    private_dirs = [
+        path(found.component.directory)
+        for found in sources.components
+        if found.component.directory is not None
+    ]
     search_dirs = list(map(path, manifest.include_directories))
     # Isolated tests compile the components' sources themselves, so they need their settings.
     built = [found.component.settings for found in (*libraries, *executables)]
@@ -213,6 +246,16 @@ def cmakelists(
             body += _link(target, "PRIVATE", [*test_links(program), *dependency_targets])
         out += ["if(BUILD_TESTING)", *(f"  {line}" if line else "" for line in body), "endif()"]
     return "\n".join(out).rstrip() + "\n"
+
+
+def shared_default(sources: Sources) -> bool | None:
+    """Whether the compiled libraries are shared by default, if they are all alike.
+
+    Then the exported project lets others choose, with BUILD_SHARED_LIBS or Conan's shared
+    option; otherwise, or without compiled libraries, None.
+    """
+    kinds = {found.component.shared for found in sources.libraries if found.sources}
+    return next(iter(kinds)) if len(kinds) == 1 else None
 
 
 def quote(value: str) -> str:

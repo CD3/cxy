@@ -39,12 +39,67 @@ zlib = "1.3.1"
         ('[bin]\nflags = ["/DX"]\n', "bin.defines"),
         ("[bin]\nshared = true\n", "unknown key 'shared'"),
         ('[lib]\nshared = "yes"\n', "true or false"),
-        ("[lib.core]\n", "unknown key 'core'"),
+        ("[lib.core]\n", "lib.core.sources is required"),
+        ('[lib]\nshared = true\n[lib.core]\nsources = "core"\n', "not both"),
+        ('[lib.Core]\nsources = "core"\n', "invalid name lib.Core"),
+        ('[lib.core]\nsources = "core"\nuses = ["io"]\n', "no library called 'io'"),
+        ('[lib.core]\nsources = "core"\nuses = ["core"]\n', "cannot use itself"),
+        (
+            '[lib.a]\nsources = "a"\nuses = ["b"]\n[lib.b]\nsources = "b"\nuses = ["a"]\n',
+            "cycle: a -> b -> a",
+        ),
+        ('[lib.a]\nsources = "src"\n[lib.b]\nsources = "src"\n', "same sources directory"),
+        ('[lib.x]\nsources = "x"\n[bin.x_lib]\nmain = "x.cpp"\n', "target x_lib"),
+        ("[bin.tool]\n", "needs main"),
+        ('[bin.tool]\nmain = "tool.hpp"\n', "must be a C"),
+        ('[bin.tool]\nmain = "tool.cpp"\nuses = ["nope"]\n', "no library called 'nope'"),
+        ('[lib.core]\nsources = "build/core"\n', "inside layout.build"),
     ],
 )
 def test_errors(extra, message):
     with pytest.raises(CxyError, match=message):
         parse(PACKAGE + extra)
+
+
+def test_components():
+    manifest = parse(
+        PACKAGE
+        + """
+[lib.core]
+sources = "src/core"
+[lib.io]
+sources = "src/io"
+include = "include"
+uses = ["core"]
+shared = true
+[bin.scatter]
+sources = "apps/scatter"
+defines = ["X"]
+[bin.convert]
+main = "apps/convert.cpp"
+uses = ["io"]
+"""
+    )
+    core, io, scatter, convert = manifest.components
+    assert (core.directory, core.include, core.uses) == ("src/core", "src/core", ())
+    assert (io.include, io.uses, io.shared) == ("include", ("core",), True)
+    assert (scatter.main, scatter.uses) == ("apps/scatter/main", ("core", "io"))
+    assert scatter.settings.defines == ("X",)
+    assert (convert.directory, convert.main, convert.uses) == (None, "apps/convert.cpp", ("io",))
+    assert manifest.include_directories == (
+        "src/core",
+        "include",
+        "src/core",
+        "src/io",
+        "apps/scatter",
+    )
+
+
+def test_named_programs_keep_the_default_library():
+    manifest = parse(PACKAGE + '[bin.tool]\nmain = "tools/tool.cpp"\n')
+    library, tool = manifest.components
+    assert (library.name, library.directory, library.include) == ("app", "lib", "include")
+    assert tool.uses == ("app",)
 
 
 def test_settings():

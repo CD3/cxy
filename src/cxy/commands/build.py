@@ -49,15 +49,21 @@ def build(*, options: Options | None = None) -> None:
     pipeline.build(Project.find(), (options or Options()).to_core())
 
 
-def run(*args: str, options: Options | None = None) -> int:
+def run(
+    *args: str,
+    program: Annotated[str | None, Parameter(name=["--bin", "-b"])] = None,
+    options: Options | None = None,
+) -> int:
     """Build and run the application.
 
     Parameters
     ----------
     args
         Arguments for the application. Put them after ``--``.
+    program
+        The program to run, if there is more than one.
     """
-    return pipeline.run(Project.find(), (options or Options()).to_core(), args)
+    return pipeline.run(Project.find(), (options or Options()).to_core(), args, program)
 
 
 def test(

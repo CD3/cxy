@@ -133,6 +133,98 @@ defines = ['PUNCTUATION="?"']
     assert isolated.returncode == 0, isolated.stdout + isolated.stderr
 
 
+COMPONENTS = {
+    "cxy.toml": """\
+[package]
+name = "multi"
+version = "1.0.0"
+
+[dev-dependencies]
+catch2 = "3.7.1"
+
+[lib.core]
+sources = "core"
+
+[lib.text]
+sources = "text"
+uses = ["core"]
+shared = true
+defines = ["TEXT_API=1"]
+
+[bin.shout]
+sources = "apps/shout"
+
+[bin.count]
+main = "tools/count.cpp"
+uses = ["core"]
+""",
+    "core/core.hpp": "#pragma once\nint answer();\n",
+    "core/core.cpp": '#include "core.hpp"\nint answer() { return 42; }\n',
+    "core/core_test.cpp": '#include <catch2/catch_test_macros.hpp>\n#include "core.hpp"\n'
+    'TEST_CASE("answer") { REQUIRE(answer() == 42); }\n',
+    "text/text.hpp": "#pragma once\n#include <string>\nstd::string label();\n",
+    "text/text.cpp": '#include "text.hpp"\n#include <string>\n#include "core.hpp"\n'
+    'std::string label() { return "answer=" + std::to_string(answer()); }\n',
+    "apps/shout/loud.hpp": "#pragma once\n#include <string>\nstd::string loud(std::string);\n",
+    "apps/shout/loud.cpp": '#include "loud.hpp"\n#include <cctype>\n'
+    "std::string loud(std::string s) {\n"
+    "    for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));\n"
+    "    return s;\n}\n",
+    "apps/shout/main.cpp": '#include <iostream>\n#include "loud.hpp"\n#include "text.hpp"\n'
+    "int main() { std::cout << loud(label()) << '\\n'; }\n",
+    # count does not use text, so it does not get its definitions.
+    "tools/count.cpp": '#include <iostream>\n#include "core.hpp"\n'
+    "#ifdef TEXT_API\n#error count must not see TEXT_API\n#endif\n"
+    "int main() { std::cout << answer() << '\\n'; }\n",
+    "tests/all.cpp": '#include <catch2/catch_test_macros.hpp>\n#include "loud.hpp"\n'
+    '#include "text.hpp"\nstatic_assert(TEXT_API == 1);\n'
+    'TEST_CASE("loud label") { REQUIRE(loud(label()) == "ANSWER=42"); }\n',
+}
+
+
+@pytest.mark.e2e
+def test_several_libraries_and_programs(tmp_path):
+    for name, text in COMPONENTS.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+
+    unchosen = cxy("run", cwd=tmp_path)
+    assert (
+        unchosen.returncode == 1 and "choose a program with --bin: shout, count" in unchosen.stderr
+    )
+    shout = cxy("run", "--bin", "shout", cwd=tmp_path)
+    assert shout.returncode == 0, shout.stdout + shout.stderr
+    assert shout.stdout.splitlines()[-1] == "ANSWER=42"
+    count = cxy("run", "--bin", "count", cwd=tmp_path)
+    assert count.stdout.splitlines()[-1] == "42", count.stdout + count.stderr
+    names = {"libtext.so", "libtext.dylib", "text.dll"}
+    assert any(path.name in names for path in (tmp_path / "build" / "cxy").rglob("*text*"))
+
+    test = cxy("test", "--", "--reporter", "compact", cwd=tmp_path)
+    assert test.returncode == 0, test.stdout + test.stderr
+    assert test.stdout.count("All tests passed") == 2
+
+    assert cxy("export", cwd=tmp_path).returncode == 0
+    (tmp_path / "cxy.toml").rename(tmp_path / "cxy.toml.saved")
+    for command in (
+        [
+            "conan",
+            "install",
+            ".",
+            "--build=missing",
+            "-s",
+            "compiler.cppstd=20",
+            "-c",
+            "tools.cmake.cmaketoolchain:generator=Ninja",
+        ],
+        ["cmake", "--preset", "conan-release"],
+        ["cmake", "--build", "--preset", "conan-release"],
+        ["ctest", "--preset", "conan-release"],
+    ):
+        done = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+
+
 @pytest.mark.e2e
 def test_export_builds_without_cxy(tmp_path):
     cxy("new", "demo", cwd=tmp_path)

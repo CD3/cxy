@@ -24,16 +24,16 @@ class CMakeInfo:
     """The targets of its components."""
 
 
-def conanfile(manifest: Manifest, *, standalone: bool = False, compiled: bool = False) -> str:
+def conanfile(manifest: Manifest, *, standalone: bool = False, shared: bool | None = None) -> str:
     """Return the conanfile.py text.
 
     A ``standalone`` recipe is for use without cxy, so it carries what cxy would otherwise
-    pass on the command line. If the library is ``compiled``, it also has a ``shared`` option,
-    for those who build it with Conan.
+    pass on the command line. Unless ``shared`` is None, it also has a ``shared`` option with
+    that default, for those who build it with Conan.
     """
     dependencies = (*manifest.dependencies, *manifest.dev_dependencies)
-    shared = standalone and compiled
-    options: dict[str, OptionValue] = {"shared": manifest.library.shared} if shared else {}
+    offered = standalone and shared is not None
+    options: dict[str, OptionValue] = {"shared": bool(shared)} if offered else {}
     options |= {
         f"{dependency.name}/*:{key}": value
         for dependency in dependencies
@@ -51,7 +51,7 @@ def conanfile(manifest: Manifest, *, standalone: bool = False, compiled: bool = 
         '    settings = "os", "compiler", "build_type", "arch"',
         '    generators = "CMakeDeps", "CMakeToolchain"',
     ]
-    if shared:
+    if offered:
         lines.append('    options = {"shared": [True, False]}')
     if options:
         lines.append("    default_options = {")
