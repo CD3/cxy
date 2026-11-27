@@ -127,7 +127,7 @@ flags = ["-O1"]
     )
     programs = plan_programs(manifest, sources, lambda _: set())
     isolated = {"lib/a_test.cpp": ["lib/a.cpp"]}
-    text = cmake.cmakelists(manifest, sources, {}, programs=programs, isolated=isolated)
+    text = cmake.cmakelists(manifest, sources, {}, programs=programs, root="..", isolated=isolated)
     assert 'add_compile_options(\n  "-Wall"\n)' in text
     assert "add_library(app_lib SHARED" in text
     assert "WINDOWS_EXPORT_ALL_SYMBOLS ON" in text
@@ -138,6 +138,27 @@ flags = ["-O1"]
     assert 'target_compile_options(app PRIVATE\n  "-O1"\n)' in text
     program = text[text.index("add_executable(app_lib_a_test_isolated") :]
     assert '"A=\\"x\\""\n    "B"\n' in program and '"-O2"\n    "-O1"\n' in program
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_others_choose_whether_the_library_is_shared(shared):
+    manifest = parse(
+        f'[package]\nname = "app"\nversion = "1.0"\n[lib]\nshared = {str(shared).lower()}\n'
+    )
+    sources = Sources.default(manifest, lib=("lib/a.cpp",))
+    managed = cmake.cmakelists(manifest, sources, {}, root="..")
+    assert f"add_library(app_lib {'SHARED' if shared else 'STATIC'}" in managed
+    assert "BUILD_SHARED_LIBS" not in managed
+
+    exported = cmake.cmakelists(manifest, sources, {})
+    default = "ON" if shared else "OFF"
+    assert f'option(BUILD_SHARED_LIBS "Build shared libraries" {default})' in exported
+    assert "add_library(app_lib\n" in exported
+    recipe = conan.conanfile(manifest, standalone=True, compiled=True)
+    assert 'options = {"shared": [True, False]}' in recipe
+    assert f"'shared': {shared}," in recipe
+    assert "shared" not in conan.conanfile(manifest, standalone=True)
+    assert "shared" not in conan.conanfile(manifest, compiled=True)
 
 
 @pytest.mark.parametrize(

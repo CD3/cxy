@@ -6,15 +6,17 @@ import re
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cxy.core import closure, cmake, conan, formatting, testing, tools
 from cxy.core import lock as locks
+from cxy.core import manifest as manifests
 from cxy.core import options as package_options
 from cxy.core.conan import CMakeInfo
 from cxy.core.errors import CxyError
 from cxy.core.lock import Lock
+from cxy.core.manifest import Manifest
 from cxy.core.project import Project, Sources
 from cxy.core.stamp import Stamp, digest, write_if_changed
 from cxy.core.testing import TestProgram
@@ -32,6 +34,8 @@ class BuildOptions:
     refresh: bool = False
     locked: bool = False
     verbose: bool = False
+    defines: tuple[str, ...] = ()
+    """Definitions for this build only, added to those in [build]."""
 
     @property
     def build_type(self) -> str:
@@ -194,7 +198,11 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
     directory = _prepare(project, options, sources)
     graph = _install(project, options, directory)
     files = {
-        project.root / "conanfile.py": conan.conanfile(project.manifest, standalone=True),
+        project.root / "conanfile.py": conan.conanfile(
+            project.manifest,
+            standalone=True,
+            compiled=any(found.sources for found in sources.libraries),
+        ),
         project.root / "CMakeLists.txt": cmake.cmakelists(
             project.manifest, sources, graph, programs=testing.plan(project, sources)
         ),
@@ -408,7 +416,8 @@ def clean(project: Project) -> None:
 
 def _prepare(project: Project, options: BuildOptions, sources: Sources) -> Path:
     # Report project errors before running tools.
-    cmake.cmakelists(project.manifest, sources, {}, programs=testing.plan(project, sources))
+    manifest = _with_defines(project.manifest, options)
+    cmake.cmakelists(manifest, sources, {}, programs=testing.plan(project, sources))
     create_build_dir(project)
     return project.build_dir / options.build_type.lower()
 
@@ -441,7 +450,7 @@ def configure(
     graph = _install(project, options, directory)
     root = Path(os.path.relpath(project.root, project.build_dir)).as_posix()
     text = cmake.cmakelists(
-        project.manifest,
+        _with_defines(project.manifest, options),
         sources,
         graph,
         programs=testing.plan(project, sources),
@@ -450,6 +459,16 @@ def configure(
     )
     _configure(project, options, directory, text)
     return directory
+
+
+def _with_defines(manifest: Manifest, options: BuildOptions) -> Manifest:
+    if not options.defines:
+        return manifest
+    for define in options.defines:
+        if not manifests.is_definition(define):
+            raise CxyError(f"-D {define}: a definition must be NAME or NAME=value")
+    defines = tuple(dict.fromkeys((*manifest.build.defines, *options.defines)))
+    return replace(manifest, build=replace(manifest.build, defines=defines))
 
 
 def create_build_dir(project: Project) -> None:

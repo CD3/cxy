@@ -89,10 +89,16 @@ def cmakelists(
         lib, settings = component.target, component.settings
         include_dir = path(component.include or component.directory)
         if found.sources:
-            kind = "SHARED" if component.shared else "STATIC"
-            out += _call("add_library", [lib, kind], map(path, found.sources))
+            if root is None:
+                # Others choose, for example with Conan's shared option.
+                default = "ON" if component.shared else "OFF"
+                out.append(f'option(BUILD_SHARED_LIBS "Build shared libraries" {default})')
+                out += _call("add_library", [lib], map(path, found.sources))
+            else:
+                kind = "SHARED" if component.shared else "STATIC"
+                out += _call("add_library", [lib, kind], map(path, found.sources))
             properties = ["OUTPUT_NAME", component.name]
-            if component.shared:
+            if component.shared or root is None:
                 # Without exports, Visual C++ makes no import library to link against.
                 properties += ["WINDOWS_EXPORT_ALL_SYMBOLS", "ON"]
             out += _call("set_target_properties", [lib, "PROPERTIES", *properties])

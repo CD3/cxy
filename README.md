@@ -16,6 +16,7 @@ cxy new hello
 cd hello
 cxy run
 cxy test -- "[some-tag]"   # arguments after -- go to the program
+cxy build -D TRACE=1       # a definition for this build only, as if added to [build]
 ```
 
 Commands: `new`, `init`, `port`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
@@ -320,6 +321,11 @@ ctest --preset conan-release
 Conan uses `conan.lock` automatically. On a platform it does not cover, add `--lockfile-partial`.
 After editing dependencies in an exported `conanfile.py`, delete `conan.lock` or make a new one:
 overrides recorded in it take precedence over the recipe's.
+
+If the project has a compiled library, the recipe has a `shared` option, which defaults to
+`lib.shared`, so `-o "&:shared=True"` builds it as a shared library. Without Conan, use
+`-DBUILD_SHARED_LIBS=ON`. Conan sets `BUILD_SHARED_LIBS` only in a new build directory, so use
+another one, or delete it, to change this.
 
 Source files are listed explicitly, so export again after adding or removing any.
 

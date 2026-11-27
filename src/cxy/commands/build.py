@@ -39,6 +39,10 @@ class Options(CommonOptions):
     jobs: Annotated[int | None, Parameter(name=["--jobs", "-j"])] = None
     """Number of parallel build jobs."""
 
+    defines: Annotated[tuple[str, ...], Parameter(name=["--define", "-D"], negative="")] = ()
+    """A preprocessor definition for this build, NAME or NAME=value, added to those in [build].
+    May be repeated."""
+
 
 def build(*, options: Options | None = None) -> None:
     """Build the project, including its tests."""

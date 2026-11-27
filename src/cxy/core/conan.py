@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cxy.core.errors import CxyError
-from cxy.core.manifest import Dependency, Manifest
+from cxy.core.manifest import Dependency, Manifest, OptionValue
 
 _STANDALONE_IMPORTS = [
     "from conan.tools.build import check_min_cppstd",
@@ -24,14 +24,17 @@ class CMakeInfo:
     """The targets of its components."""
 
 
-def conanfile(manifest: Manifest, *, standalone: bool = False) -> str:
+def conanfile(manifest: Manifest, *, standalone: bool = False, compiled: bool = False) -> str:
     """Return the conanfile.py text.
 
     A ``standalone`` recipe is for use without cxy, so it carries what cxy would otherwise
-    pass on the command line.
+    pass on the command line. If the library is ``compiled``, it also has a ``shared`` option,
+    for those who build it with Conan.
     """
     dependencies = (*manifest.dependencies, *manifest.dev_dependencies)
-    options = {
+    shared = standalone and compiled
+    options: dict[str, OptionValue] = {"shared": manifest.library.shared} if shared else {}
+    options |= {
         f"{dependency.name}/*:{key}": value
         for dependency in dependencies
         for key, value in dependency.options.items()
@@ -48,6 +51,8 @@ def conanfile(manifest: Manifest, *, standalone: bool = False) -> str:
         '    settings = "os", "compiler", "build_type", "arch"',
         '    generators = "CMakeDeps", "CMakeToolchain"',
     ]
+    if shared:
+        lines.append('    options = {"shared": [True, False]}')
     if options:
         lines.append("    default_options = {")
         lines += [f"        {key!r}: {value!r}," for key, value in options.items()]

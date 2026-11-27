@@ -103,7 +103,9 @@ defines = ['PUNCTUATION="?"']
     )
     (project / "src" / "main.cpp").write_text(
         f'#include <iostream>\n#include "demo/greeting.hpp"\n{required}'
-        "int main() { std::cout << demo::greet(\"world\") << PUNCTUATION << '\\n'; }\n"
+        "int main() {\n"
+        '#ifdef LOUD\n    std::cout << "LOUD ";\n#endif\n'
+        "    std::cout << demo::greet(\"world\") << PUNCTUATION << '\\n';\n}\n"
     )
     # The library's definitions reach whatever uses it, tests included.
     (project / "tests" / "greeting_test.cpp").unlink()
@@ -115,6 +117,13 @@ defines = ['PUNCTUATION="?"']
     run = cxy("run", cwd=project)
     assert run.returncode == 0, run.stdout + run.stderr
     assert "Howdy, world!?" in run.stdout
+    # Definitions on the command line are for that build only.
+    loud = cxy("run", "-D", "LOUD", cwd=project)
+    assert loud.returncode == 0, loud.stdout + loud.stderr
+    assert "LOUD Howdy, world!?" in loud.stdout
+    assert "LOUD" not in cxy("run", cwd=project).stdout
+    invalid = cxy("build", "-D", "1X", cwd=project)
+    assert invalid.returncode == 1 and "NAME or NAME=value" in invalid.stderr
     names = {"libdemo.so", "libdemo.dylib", "demo.dll"}
     assert any(path.name in names for path in (project / "build" / "cxy").rglob("*demo*"))
 
@@ -145,6 +154,18 @@ def test_export_builds_without_cxy(tmp_path):
     tool("cmake", "--preset", "conan-release")
     tool("cmake", "--build", "--preset", "conan-release")
     assert "100% tests passed" in tool("ctest", "--preset", "conan-release")
+
+    # Conan's shared option chooses the kind of library, as for other packages.
+    tool("conan", "install", ".", *settings, "-s", "build_type=Debug", "-o", "&:shared=True")
+    tool("cmake", "--preset", "conan-debug")
+    tool("cmake", "--build", "--preset", "conan-debug")
+    assert "100% tests passed" in tool("ctest", "--preset", "conan-debug")
+    shared = {"libdemo.so", "libdemo.dylib", "demo.dll"}
+
+    def built(build_type):
+        return {path.name for path in (project / "build" / build_type).rglob("*demo*")}
+
+    assert built("Debug") & shared and not built("Release") & shared
 
     (tmp_path / "cxy.toml").rename(project / "cxy.toml")
     (project / "CMakeLists.txt").write_text("# edited\n")
