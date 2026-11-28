@@ -316,11 +316,14 @@ extensions. Be careful when checking a project that you do not trust.
 In a CMake project that uses Conan, `cxy port` writes a `cxy.toml` that builds the same thing, so
 that you can use cxy while everyone else keeps their own setup. It writes nothing else in the
 project: it runs Conan and CMake on the project in `build/cxy/port`, and reads what CMake reports
-about each target with its File API. `cxy port --dry-run` prints the manifest instead.
+about each target with its File API. The File API leaves out interface libraries, so a file that
+`port` has CMake include after `project()` lists them. `cxy port --dry-run` prints the manifest
+instead.
 
 It finds the dependencies, their options and overrides, the C++ standard, which directories hold
 the libraries, programs, headers and tests, which libraries each uses, the test framework, and the definitions and compiler
-options that the project sets, which go in `[build]`, `[lib]` and `[bin]`. Anything that cxy would build
+options that the project sets, which go in `[build]`, `[lib]` and `[bin]`. An interface library
+with headers in the project is a header-only library, with the definitions it passes on. Anything that cxy would build
 differently is a problem, and then `cxy.toml` is written only with `--force`:
 
 - an application whose `main()` is not in a file named `main.cpp`, or, with several programs, a
@@ -330,6 +333,9 @@ differently is a problem, and then `cxy.toml` is written only with `--force`:
 - compile definitions and options that cxy cannot give the same targets, such as one only for the
   tests, or a library's definition that the application does not get but uses;
 - link options;
+- what an interface library passes on that cxy cannot: compiler options, generator expressions
+  other than `$<BUILD_INTERFACE:…>` and `$<INSTALL_INTERFACE:…>`, and definitions from one with
+  no headers in the project;
 - flags and libraries from somewhere other than Conan, such as CMake's `FindOpenMP`;
 - tool requirements other than CMake and Ninja, and options for packages that are not direct
   dependencies.

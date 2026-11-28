@@ -540,3 +540,203 @@ def test_port_several_libraries_and_programs(tmp_path):
     assert run.stdout.splitlines()[-1] == "ANSWER=42"
     test = cxy("test", cwd=tmp_path)
     assert test.returncode == 0, test.stdout + test.stderr
+
+
+def test_header_only_libraries(tmp_path):
+    write(
+        tmp_path,
+        {
+            "headers/hdr/answer.hpp": "inline int answer() { return HDR_ANSWER; }\n",
+            "core/core.cpp": "#include <hdr/answer.hpp>\n",
+            "core/core.hpp": "",
+            "app/main.cpp": "",
+            "tests/all.cpp": GTEST,
+        },
+    )
+    # What an interface library passes on reaches what links it from target_link_libraries.
+    received = ("-DHDR_ANSWER=21",)
+    manifest, findings = propose(
+        tmp_path,
+        [
+            Target(
+                "hdr", "INTERFACE_LIBRARY", includes=("headers",), definitions=("HDR_ANSWER=21",)
+            ),
+            Target(
+                "core",
+                "STATIC_LIBRARY",
+                sources=("core/core.cpp",),
+                includes=("core", "headers"),
+                links=("hdr",),
+                inherited=received,
+            ),
+            Target(
+                "app",
+                "EXECUTABLE",
+                "app",
+                ("app/main.cpp",),
+                includes=("core", "headers"),
+                links=("core",),
+                inherited=received,
+            ),
+            Target(
+                "tests",
+                "EXECUTABLE",
+                sources=("tests/all.cpp",),
+                links=("core",),
+                inherited=received,
+            ),
+        ],
+    )
+    assert findings.problems == []
+    hdr, core, app = manifest.components
+    assert (hdr.name, hdr.directory, hdr.include, hdr.uses) == ("hdr", "headers", "headers", ())
+    assert hdr.settings.defines == ("HDR_ANSWER=21",)
+    assert (core.directory, core.include, core.uses) == ("core", "core", ("hdr",))
+    assert app.uses == ("core",)
+    assert manifest.build.defines == ()
+
+
+def test_header_only_library_alone(tmp_path):
+    write(tmp_path, {"headers/demo/a.hpp": "#ifdef DEMO_X\n#endif\n", "tests/one.cpp": GTEST})
+    manifest, findings = propose(
+        tmp_path,
+        [
+            Target("demo", "INTERFACE_LIBRARY", includes=("headers",), definitions=("DEMO_X",)),
+            Target(
+                "one",
+                "EXECUTABLE",
+                sources=("tests/one.cpp",),
+                includes=("headers",),
+                links=("demo",),
+                inherited=("-DDEMO_X",),
+            ),
+        ],
+    )
+    assert findings.problems == []
+    assert manifest.layout.include == "headers"
+    assert manifest.library.defines == ("DEMO_X",)
+
+
+def test_what_interface_libraries_cannot_pass_on(tmp_path):
+    write(tmp_path, {"headers/a.hpp": "", "lib/a.cpp": "", "src/main.cpp": ""})
+    _, findings = propose(
+        tmp_path,
+        [
+            Target("deps", "INTERFACE_LIBRARY", definitions=("USE_X",)),
+            Target(
+                "hdr",
+                "INTERFACE_LIBRARY",
+                includes=("headers",),
+                flags=("-Wall",),
+                unreadable=("$<$<CONFIG:Debug>:DBG>",),
+            ),
+            Target(
+                "a",
+                "STATIC_LIBRARY",
+                sources=("lib/a.cpp",),
+                includes=("headers",),
+                links=("hdr", "deps"),
+                inherited=("-DUSE_X", "-Wall"),
+            ),
+            Target("demo", "EXECUTABLE", "demo", ("src/main.cpp",), links=("a",)),
+        ],
+    )
+    assert findings.problems == [
+        "hdr passes on what cxy cannot read: $<$<CONFIG:Debug>:DBG>",
+        "a is compiled with -Wall from hdr, but cxy passes a library's options on to nothing else",
+        "deps passes on -DUSE_X, but has no headers in the project, so cxy has no library for "
+        "them to come from",
+    ]
+
+
+def test_interface_libraries_from_the_listing(tmp_path):
+    def project_path(text, base=tmp_path):
+        path = (base / text).resolve()
+        return path.relative_to(tmp_path).as_posix() if path.is_relative_to(tmp_path) else None
+
+    listing = [
+        {
+            "name": "hdr",
+            "type": "INTERFACE_LIBRARY",
+            "directory": str(tmp_path / "sub"),
+            "links": ["fmt::fmt", "other"],
+            "includes": [f"$<BUILD_INTERFACE:{tmp_path}/sub/include>", "$<INSTALL_INTERFACE:x>"],
+            "definitions": ["-DA=1", "$<$<CONFIG:Debug>:B>"],
+            "options": [],
+            "link_options": ["-pthread"],
+        },
+        {
+            "name": "outside",
+            "type": "INTERFACE_LIBRARY",
+            "directory": "/elsewhere",
+            "links": [],
+            "includes": [],
+            "definitions": [],
+            "options": [],
+            "link_options": [],
+        },
+        {"name": "core", "type": "STATIC_LIBRARY", "directory": str(tmp_path), "links": ["hdr"]},
+    ]
+    core, other, hdr = porting._with_interface_libraries(
+        [Target("core", "STATIC_LIBRARY", links=("other",)), Target("other", "STATIC_LIBRARY")],
+        listing,
+        project_path,
+    )
+    assert core.links == ("other", "hdr") and other.links == ()
+    assert (hdr.name, hdr.kind, hdr.includes) == ("hdr", "INTERFACE_LIBRARY", ("sub/include",))
+    assert (hdr.definitions, hdr.link_flags, hdr.links) == (("A=1",), ("-pthread",), ("other",))
+    assert hdr.unreadable == ("$<$<CONFIG:Debug>:B>",)
+
+
+HEADER_ONLY_CMAKELISTS = """\
+cmake_minimum_required(VERSION 3.17)
+project(Answers VERSION 1.0.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+find_package(Catch2 REQUIRED)
+add_subdirectory(headers)
+add_library(core STATIC core/core.cpp)
+target_include_directories(core PUBLIC core)
+target_link_libraries(core PUBLIC answers::hdr)
+add_executable(app app/main.cpp)
+target_link_libraries(app PRIVATE core)
+include(CTest)
+add_executable(all_tests tests/all.cpp)
+target_link_libraries(all_tests PRIVATE core Catch2::Catch2WithMain)
+"""
+
+HEADER_ONLY_FILES = {
+    "CMakeLists.txt": HEADER_ONLY_CMAKELISTS,
+    "headers/CMakeLists.txt": "add_library(hdr INTERFACE)\n"
+    "add_library(answers::hdr ALIAS hdr)\n"
+    "target_include_directories(hdr INTERFACE\n"
+    "  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:include>)\n"
+    "target_compile_definitions(hdr INTERFACE HDR_ANSWER=21)\n",
+    "headers/hdr/answer.hpp": "#pragma once\ninline int answer() { return HDR_ANSWER; }\n",
+    "core/core.hpp": "#pragma once\nint doubled();\n",
+    "core/core.cpp": '#include "core.hpp"\n#include <hdr/answer.hpp>\n'
+    "int doubled() { return 2 * answer(); }\n",
+    "app/main.cpp": '#include <cstdio>\n#include "core.hpp"\n'
+    'int main() { std::printf("%d\\n", doubled()); }\n',
+    "tests/all.cpp": "#include <catch2/catch_test_macros.hpp>\n"
+    '#include <hdr/answer.hpp>\n#include "core.hpp"\n'
+    'TEST_CASE("answers") { REQUIRE(answer() == 21); REQUIRE(doubled() == 42); }\n',
+    "conanfile.txt": "[test_requires]\ncatch2/3.7.1\n",
+}
+
+
+@pytest.mark.e2e
+def test_port_header_only_library(tmp_path):
+    write(tmp_path, HEADER_ONLY_FILES)
+    result = cxy("port", cwd=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = manifests.load(tmp_path / "cxy.toml")
+    components = {c.where: c for c in manifest.components}
+    assert set(components) == {"lib.hdr", "lib.core", "bin.app"}
+    hdr, core = components["lib.hdr"], components["lib.core"]
+    assert (hdr.directory, hdr.settings.defines) == ("headers", ("HDR_ANSWER=21",))
+    assert (core.uses, components["bin.app"].uses) == (("hdr",), ("core",))
+    run = cxy("run", cwd=tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == "42"
+    test = cxy("test", cwd=tmp_path)
+    assert test.returncode == 0, test.stdout + test.stderr

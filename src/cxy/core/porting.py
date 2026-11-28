@@ -40,6 +40,113 @@ _OPTION_COMMANDS = {"add_compile_options", "set_property", "target_compile_optio
 _LINK_OPTION_COMMANDS = {"add_link_options", "set_property", "target_link_options"}
 _STANDARD_COMMANDS = {"set_property", "set_target_properties", "target_compile_features"}
 _CMAKE_OPTIONS_IGNORED = {"BUILD_TESTING"}
+_TARGETS_FILE = "cxy-port-targets.json"
+# CMake's File API leaves out interface libraries without sources, and the links to them, so
+# a file included by project() lists the targets once the top-level directory is done.
+_TARGETS_HOOK = r"""# Written by cxy port.
+get_property(_cxy_port_listing GLOBAL PROPERTY CXY_PORT_LISTING)
+if(NOT _cxy_port_listing)
+  set_property(GLOBAL PROPERTY CXY_PORT_LISTING ON)
+  # Functions keep the policies they are defined with, not the project's.
+  cmake_policy(PUSH)
+  cmake_policy(VERSION 3.24)
+
+  function(_cxy_port_quote out value)
+    string(REPLACE "\\" "\\\\" value "${value}")
+    string(REPLACE "\"" "\\\"" value "${value}")
+    string(REPLACE "\n" "\\n" value "${value}")
+    string(REPLACE "\r" "\\r" value "${value}")
+    string(REPLACE "\t" "\\t" value "${value}")
+    set(${out} "\"${value}\"" PARENT_SCOPE)
+  endfunction()
+
+  function(_cxy_port_array out)
+    set(text "")
+    set(separator "")
+    foreach(item IN LISTS ARGN)
+      _cxy_port_quote(item "${item}")
+      string(APPEND text "${separator}${item}")
+      set(separator ", ")
+    endforeach()
+    set(${out} "[${text}]" PARENT_SCOPE)
+  endfunction()
+
+  function(_cxy_port_property out target property)
+    get_target_property(value "${target}" ${property})
+    if(value STREQUAL "value-NOTFOUND")
+      set(value "")
+    endif()
+    set(${out} "${value}" PARENT_SCOPE)
+  endfunction()
+
+  # The targets that a target links, by their real names.
+  function(_cxy_port_links out target type)
+    if(type STREQUAL "INTERFACE_LIBRARY")
+      _cxy_port_property(items "${target}" INTERFACE_LINK_LIBRARIES)
+    else()
+      _cxy_port_property(items "${target}" LINK_LIBRARIES)
+    endif()
+    set(links "")
+    foreach(item IN LISTS items)
+      if(item MATCHES "^\\$<(BUILD_INTERFACE|BUILD_LOCAL_INTERFACE|LINK_ONLY):([^<>]*)>$")
+        set(item "${CMAKE_MATCH_2}")
+      endif()
+      if(NOT item STREQUAL "" AND TARGET "${item}")
+        get_target_property(aliased "${item}" ALIASED_TARGET)
+        if(NOT aliased STREQUAL "aliased-NOTFOUND")
+          set(item "${aliased}")
+        endif()
+        list(APPEND links "${item}")
+      endif()
+    endforeach()
+    set(${out} "${links}" PARENT_SCOPE)
+  endfunction()
+
+  function(_cxy_port_list_targets)
+    set(entries "")
+    set(separator "")
+    set(directories "${CMAKE_SOURCE_DIR}")
+    while(directories)
+      list(POP_FRONT directories directory)
+      get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+      list(APPEND directories ${subdirectories})
+      get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+      foreach(target IN LISTS targets)
+        get_target_property(type "${target}" TYPE)
+        _cxy_port_links(links "${target}" "${type}")
+        _cxy_port_array(links ${links})
+        _cxy_port_quote(name "${target}")
+        _cxy_port_quote(kind "${type}")
+        _cxy_port_quote(where "${directory}")
+        set(entry "{\"name\": ${name}, \"type\": ${kind}, \"directory\": ${where}")
+        string(APPEND entry ", \"links\": ${links}")
+        if(type STREQUAL "INTERFACE_LIBRARY")
+          foreach(field IN ITEMS includes definitions options link_options)
+            if(field STREQUAL "includes")
+              set(property INTERFACE_INCLUDE_DIRECTORIES)
+            elseif(field STREQUAL "definitions")
+              set(property INTERFACE_COMPILE_DEFINITIONS)
+            elseif(field STREQUAL "options")
+              set(property INTERFACE_COMPILE_OPTIONS)
+            else()
+              set(property INTERFACE_LINK_OPTIONS)
+            endif()
+            _cxy_port_property(values "${target}" ${property})
+            _cxy_port_array(values ${values})
+            string(APPEND entry ", \"${field}\": ${values}")
+          endforeach()
+        endif()
+        string(APPEND entries "${separator}${entry}}")
+        set(separator ",\n")
+      endforeach()
+    endwhile()
+    file(WRITE "${CMAKE_BINARY_DIR}/cxy-port-targets.json" "[${entries}]\n")
+  endfunction()
+
+  cmake_policy(POP)
+  cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _cxy_port_list_targets)
+endif()
+"""
 
 
 @dataclass
@@ -97,6 +204,9 @@ class Target:
 
     links: tuple[str, ...] = ()
     """The project's targets that it depends on."""
+
+    unreadable: tuple[str, ...] = ()
+    """What an interface library passes on with generator expressions that cxy cannot read."""
 
     received: tuple[str, ...] = ()
     """Definitions from the project's own libraries that it links."""
@@ -248,6 +358,9 @@ def _configure(root: Path, build: Path, toolchain: Path, options: BuildOptions) 
         {"kind": "cmakeFiles", "version": 1},
     ]
     query.write_text(json.dumps({"requests": requests}), encoding="utf-8")
+    hook = build / "cxy-port-targets.cmake"
+    hook.write_text(_TARGETS_HOOK, encoding="utf-8")
+    (build / _TARGETS_FILE).unlink(missing_ok=True)
     tools.status("Configuring", "the CMake project")
     tools.run(
         "cmake",
@@ -260,6 +373,7 @@ def _configure(root: Path, build: Path, toolchain: Path, options: BuildOptions) 
         "Ninja",
         f"-DCMAKE_MAKE_PROGRAM={Path(tools.find('ninja')).as_posix()}",
         f"-DCMAKE_TOOLCHAIN_FILE={toolchain.as_posix()}",
+        f"-DCMAKE_PROJECT_INCLUDE={hook.as_posix()}",
         "-DCMAKE_BUILD_TYPE=Debug",
         "--log-level=" + ("VERBOSE" if options.verbose else "WARNING"),
         cwd=root,
@@ -466,6 +580,9 @@ def read_cmake(
         target = _target(data, project_path, lambda text: _built(text, build))
         links = (names[d["id"]] for d in data.get("dependencies", []) if d.get("id") in names)
         targets.append(replace(target, links=tuple(links)))
+    listing = build / _TARGETS_FILE
+    if listing.is_file():
+        targets = _with_interface_libraries(targets, _json(listing), project_path)
 
     mentions = False
     for item in inputs:
@@ -584,6 +701,58 @@ def _target(data: Mapping[str, Any], project_path: Any, built: Any) -> Target:
     )
 
 
+def _with_interface_libraries(
+    targets: Sequence[Target], listing: Sequence[Mapping[str, Any]], project_path: Any
+) -> list[Target]:
+    """Add the project's interface libraries, and the links to them, from the hook's listing."""
+    interfaces = {
+        entry["name"]: entry
+        for entry in listing
+        if entry["type"] == "INTERFACE_LIBRARY" and project_path(entry["directory"]) is not None
+    }
+    known = {target.name for target in targets} | set(interfaces)
+    links = {entry["name"]: [n for n in entry["links"] if n in known] for entry in listing}
+    result = []
+    for target in targets:
+        if target.name in interfaces:  # One with sources, which are headers.
+            continue
+        added = [n for n in links.get(target.name, []) if n in interfaces]
+        result.append(replace(target, links=tuple(dict.fromkeys((*target.links, *added)))))
+    for name, entry in interfaces.items():
+        unreadable: list[str] = []
+
+        def plain(items: Sequence[str], unreadable: list[str] = unreadable) -> list[str]:
+            found = []
+            for item in items:
+                match = re.fullmatch(r"\$<(BUILD_INTERFACE|BUILD_LOCAL_INTERFACE):(.*)>", item)
+                if match is not None:
+                    item = match[2]
+                elif item.startswith("$<INSTALL_INTERFACE:"):
+                    continue
+                if "$<" in item:
+                    unreadable.append(item)
+                elif item:
+                    found.append(item)
+            return found
+
+        base = Path(entry["directory"])
+        includes = (project_path(item, base) for item in plain(entry["includes"]))
+        result.append(
+            Target(
+                name=name,
+                kind="INTERFACE_LIBRARY",
+                languages=frozenset(),
+                includes=tuple(dict.fromkeys(i for i in includes if i is not None)),
+                definitions=tuple(d.removeprefix("-D") for d in plain(entry["definitions"])),
+                flags=tuple(plain(entry["options"])),
+                link_flags=tuple(plain(entry["link_options"])),
+                links=tuple(links[name]),
+                unreadable=tuple(unreadable),
+            )
+        )
+    return result
+
+
 def _cmake_options(entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Return the project's boolean cache options, which option() creates."""
     found = {}
@@ -632,12 +801,31 @@ def propose(
             findings.problems.append(f"{target.name} compiles C, which cxy cannot build yet")
         targets.append(target)
 
+    for target in targets:
+        if target.unreadable:
+            findings.problems.append(
+                f"{target.name} passes on what cxy cannot read: {' '.join(target.unreadable)}"
+            )
     targets = _received(targets, findings)
+    # The options an interface library passes on were reported with what receives them.
+    targets = [replace(t, flags=()) if _is_interface(t) else t for t in targets]
+    for target in targets:
+        if _is_interface(target) and not target.includes and target.definitions:
+            findings.problems.append(
+                f"{target.name} passes on -D{' -D'.join(target.definitions)}, but has no "
+                "headers in the project, so cxy has no library for them to come from"
+            )
     default = Project(root, Manifest(name=name, version=version))
     tests = [t for t in targets if t.kind == "EXECUTABLE" and _is_test(default, t)]
-    libraries = [t for t in targets if t.kind in _LIBRARIES and t.sources]
+    libraries = [
+        t
+        for t in targets
+        if (t.kind in _LIBRARIES and t.sources) or (_is_interface(t) and t.includes)
+    ]
     programs = [t for t in targets if t.kind == "EXECUTABLE" and t not in tests]
     for library in libraries:
+        if _is_interface(library):
+            continue
         if library.kind not in ("STATIC_LIBRARY", "SHARED_LIBRARY"):
             findings.warnings.append(f"cxy builds {library.name} as a static library")
 
@@ -723,6 +911,17 @@ def _received(targets: Sequence[Target], findings: Findings) -> list[Target]:
     return result
 
 
+def _is_interface(target: Target) -> bool:
+    return target.kind == "INTERFACE_LIBRARY"
+
+
+def _home(target: Target) -> str:
+    """The directory of a library's code: its sources, or a header-only one's headers."""
+    if not target.sources and target.includes:
+        return target.includes[0]
+    return _common(target.sources) or "."
+
+
 def _package_name(text: str) -> str:
     name = re.sub(r"[^a-z0-9_-]+", "-", text.lower()).strip("-_")
     name = re.sub(r"^[^a-z]+", "", name)
@@ -785,13 +984,16 @@ def _components(
         """Its public include directory: one that the libraries it uses do not provide."""
         if target.name in publics:
             return publics[target.name]
-        own = _common(target.sources) or "."
+        own = _home(target)
         provided: set[str] = set()
         for link in target.links:
             if link in by_name and link not in visiting:
                 used = by_name[link]
-                provided |= {public(used, (*visiting, target.name)), _common(used.sources) or "."}
-        candidates = [i for i in target.includes if i != own and i not in provided]
+                provided |= {public(used, (*visiting, target.name)), _home(used)}
+        if target.sources:
+            candidates = [i for i in target.includes if i != own and i not in provided]
+        else:  # A header-only library's own are all it passes on.
+            candidates = list(target.includes)
         if len(candidates) > 1:
             findings.problems.append(
                 f"{target.name} uses several include directories ({', '.join(candidates)}), but "
@@ -804,7 +1006,7 @@ def _components(
     mapped = []
     for target in libraries:
         name = names[target.name]
-        own = _common(target.sources) or "."
+        own = _home(target)
         table: dict[str, Any] = {"sources": own}
         if (include := public(target)) != own:
             table["include"] = include
@@ -1099,8 +1301,10 @@ def _carry_settings(
     def common(values: Sequence[tuple[str, ...]]) -> list[str]:
         return [v for v in values[0] if all(v in other for other in values[1:])]
 
-    build_defines = [d for d in common([t.definitions for t in everything]) if d in usable]
-    build_flags = common([t.flags for t in everything])
+    # What compiles nothing does not decide what everything is compiled with.
+    compiling = [t for t in everything if t.sources] or everything
+    build_defines = [d for d in common([t.definitions for t in compiling]) if d in usable]
+    build_flags = common([t.flags for t in compiling])
     items = {item.target.name: item for item in mapped}
     defines = {
         name: [d for d in item.target.definitions if d in usable and d not in build_defines]
