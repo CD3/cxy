@@ -76,3 +76,24 @@ def test_changes():
         "removed spdlog 1.14.1",
         "added zlib 1.3",
     ]
+
+
+def test_conditional_inputs(tmp_path):
+    plain = manifest('[dependencies]\nfmt = "11"\n')
+    assert "when" not in locks.inputs(plain)
+    conditional = manifest('[dependencies]\nfmt = "11"\n[when.windows.dependencies]\nwil = "1"\n')
+    inputs = locks.inputs(conditional)
+    assert inputs["when"] == {
+        "windows": {"dependencies": {"wil": {"version": "1"}}, "dev-dependencies": {}}
+    }
+    # The same on every platform, so that a lock for one keeps what others need.
+    assert locks.inputs(conditional.resolve({"os": "Linux"})) == inputs
+    assert locks.conditional_names(conditional.resolve({"os": "Linux"})) == {"wil"}
+
+    path = tmp_path / locks.FILENAME
+    lock = Lock(inputs, CONAN, {"wil": {"package": "wil", "target": "WIL::WIL"}})
+    lock.save(path)
+    assert Lock.load(path) == lock
+    assert lock.without_package("fmt").cmake == lock.cmake
+    Lock(inputs, CONAN).save(path)
+    assert "cmake" not in json.loads(path.read_text())

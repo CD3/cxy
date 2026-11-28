@@ -84,3 +84,18 @@ def test_generator_expression():
         "$<AND:$<PLATFORM_ID:Windows>,$<NOT:$<CONFIG:Debug>>,"
         "$<OR:$<CXX_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:Clang>>>"
     )
+
+
+def test_python():
+    condition = conditions.parse('all(windows, not(any(msvc, compiler = "clang")))')
+    assert conditions.python(condition) == (
+        "self.settings.os == 'Windows' and not "
+        "(self.settings.compiler == 'msvc' or self.settings.compiler == 'clang')"
+    )
+
+
+def test_can_both_hold():
+    windows, unix, msvc = map(conditions.parse, ("windows", "unix", "msvc"))
+    assert not conditions.can_both_hold(windows, unix)
+    assert conditions.can_both_hold(windows, msvc)
+    assert not conditions.can_both_hold(msvc, conditions.parse("linux"))

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from cxy.core import conditions
 from cxy.core.errors import CxyError
 from cxy.core.manifest import Dependency, Manifest, OptionValue
 
@@ -31,7 +32,13 @@ def conanfile(manifest: Manifest, *, standalone: bool = False, shared: bool | No
     pass on the command line. Unless ``shared`` is None, it also has a ``shared`` option with
     that default, for those who build it with Conan.
     """
-    dependencies = (*manifest.dependencies, *manifest.dev_dependencies)
+    conditional = [c for c in manifest.when if c.dependencies or c.dev_dependencies]
+    dependencies = (
+        *manifest.dependencies,
+        *manifest.dev_dependencies,
+        # Conan ignores the options of packages that are not needed.
+        *(d for c in conditional for d in (*c.dependencies, *c.dev_dependencies)),
+    )
     offered = standalone and shared is not None
     options: dict[str, OptionValue] = {"shared": bool(shared)} if offered else {}
     options |= {
@@ -57,19 +64,24 @@ def conanfile(manifest: Manifest, *, standalone: bool = False, shared: bool | No
         lines.append("    default_options = {")
         lines += [f"        {key!r}: {value!r}," for key, value in options.items()]
         lines.append("    }")
-    requires = []
-    for dependency in manifest.dependencies:
-        traits = ", force=True" if dependency.force else ""
-        requires.append(f"        self.requires({dependency.ref!r}{traits})")
+    requires = _requires("requires", manifest.dependencies)
+    for c in conditional:
+        if c.dependencies:
+            requires += [f"        if {conditions.python(c.condition)}:"]
+            requires += [f"    {line}" for line in _requires("requires", c.dependencies)]
     for name, version in manifest.overrides.items():
         requires.append(f"        self.requires({f'{name}/{version}'!r}, override=True)")
     if requires:
         lines += ["", "    def requirements(self):", *requires]
-    if manifest.dev_dependencies:
-        lines += ["", "    def build_requirements(self):"]
-        for dependency in manifest.dev_dependencies:
-            traits = ", force=True" if dependency.force else ""
-            lines.append(f"        self.test_requires({dependency.ref!r}{traits})")
+    test_requires = _requires("test_requires", manifest.dev_dependencies)
+    for c in conditional:
+        if c.dev_dependencies:
+            test_requires += [f"        if {conditions.python(c.condition)}:"]
+            test_requires += [
+                f"    {line}" for line in _requires("test_requires", c.dev_dependencies)
+            ]
+    if test_requires:
+        lines += ["", "    def build_requirements(self):", *test_requires]
     if standalone:
         lines += [
             "",
@@ -87,6 +99,12 @@ def conanfile(manifest: Manifest, *, standalone: bool = False, shared: bool | No
             "        cmake.build()",
         ]
     return "\n".join(lines) + "\n"
+
+
+def _requires(method: str, dependencies: tuple[Dependency, ...]) -> list[str]:
+    return [
+        f"        self.{method}({d.ref!r}{', force=True' if d.force else ''})" for d in dependencies
+    ]
 
 
 def read_graph(output: str) -> dict[str, CMakeInfo]:

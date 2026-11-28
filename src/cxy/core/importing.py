@@ -38,6 +38,7 @@ _DEFINITION_COMMANDS = {
 }
 _OPTION_COMMANDS = {"add_compile_options", "set_property", "target_compile_options"}
 _LINK_OPTION_COMMANDS = {"add_link_options", "set_property", "target_link_options"}
+_LINKED_KINDS = {"EXECUTABLE", "SHARED_LIBRARY", "MODULE_LIBRARY"}
 _STANDARD_COMMANDS = {"set_property", "set_target_properties", "target_compile_features"}
 _CMAKE_OPTIONS_IGNORED = {"BUILD_TESTING"}
 _TARGETS_FILE = "cxy-import-targets.json"
@@ -1394,24 +1395,32 @@ def _carry_settings(
     everything = [*(item.target for item in mapped), *tests]
     if not everything:
         return
+    items = {item.target.name: item for item in mapped}
+
+    def common(values: Sequence[tuple[str, ...]]) -> list[str]:
+        return [v for v in values[0] if all(v in other for other in values[1:])]
+
+    # cxy links everything with the [build] options, and a program with its own too.
+    linked = [t for t in everything if t.kind in _LINKED_KINDS]
+    build_link_flags = common([t.link_flags for t in linked]) if linked else []
+    link_flags: dict[str, list[str]] = {}
     for target in everything:
-        if target.link_flags:
-            listed = " ".join(target.link_flags)
+        extra = [f for f in target.link_flags if f not in build_link_flags]
+        item = items.get(target.name)
+        if extra and item is not None and item.kind is Kind.PROGRAM:
+            link_flags[target.name] = extra
+        elif extra:
             findings.problems.append(
-                f"{target.name} is linked with options cxy cannot set: {listed}"
+                f"{target.name} is linked with options cxy cannot set for it: {' '.join(extra)}"
             )
     usable = {d for t in everything for d in t.definitions if manifests.is_definition(d)}
     for definition in sorted({d for t in everything for d in t.definitions} - usable):
         findings.problems.append(f"cxy cannot set -D{definition}, which is not NAME or NAME=value")
 
-    def common(values: Sequence[tuple[str, ...]]) -> list[str]:
-        return [v for v in values[0] if all(v in other for other in values[1:])]
-
     # What compiles nothing does not decide what everything is compiled with.
     compiling = [t for t in everything if t.sources] or everything
     build_defines = [d for d in common([t.definitions for t in compiling]) if d in usable]
     build_flags = common([t.flags for t in compiling])
-    items = {item.target.name: item for item in mapped}
     defines = {
         name: [d for d in item.target.definitions if d in usable and d not in build_defines]
         for name, item in items.items()
@@ -1481,18 +1490,23 @@ def _carry_settings(
         else:
             findings.warnings.append(f"{message}; nothing they compile uses it, so it is left out")
 
-    def settings(item_defines: list[str], item_flags: list[str]) -> dict[str, Any]:
+    def settings(
+        item_defines: list[str], item_flags: list[str], item_link_flags: list[str]
+    ) -> dict[str, Any]:
         table: dict[str, Any] = {}
         if item_defines:
             table["defines"] = item_defines
         if item_flags:
             table["flags"] = item_flags
+        if item_link_flags:
+            table["link-flags"] = item_link_flags
         return table
 
-    if table := settings(build_defines, build_flags):
+    if table := settings(build_defines, build_flags, build_link_flags):
         document["build"] = table
     for item in mapped:
-        table = settings(defines[item.target.name], flags[item.target.name])
+        name = item.target.name
+        table = settings(defines[name], flags[name], link_flags.get(name, []))
         section = "lib" if item.kind is Kind.LIBRARY else "bin"
         if named:
             existing: Any = document[section]

@@ -419,8 +419,35 @@ def test_settings_are_carried(tmp_path):
     problems = "\n".join(findings.problems)
     assert "tests is compiled with -DONLY_TESTS, which cxy cannot set" in problems
     assert "tests is compiled with options cxy cannot set for it: -g3" in problems
-    assert "tests is linked with options cxy cannot set: -Wl,--as-needed" in problems
+    assert "tests is linked with options cxy cannot set for it: -Wl,--as-needed" in problems
     assert len(findings.problems) == 3
+
+
+def test_link_options(tmp_path):
+    write(tmp_path, {"include/a.hpp": "", "lib/a.cpp": "", "src/main.cpp": ""})
+    manifest, findings = propose(
+        tmp_path,
+        [
+            Target(
+                "a",
+                "SHARED_LIBRARY",
+                sources=("lib/a.cpp",),
+                includes=("include",),
+                link_flags=("-Wl,--as-needed",),
+            ),
+            Target(
+                "demo",
+                "EXECUTABLE",
+                "demo",
+                ("src/main.cpp",),
+                link_flags=("-Wl,--as-needed", "-static-libstdc++"),
+            ),
+        ],
+    )
+    # What everything is linked with goes in [build], and a program's own in [bin].
+    assert manifest.build.link_flags == ("-Wl,--as-needed",)
+    assert manifest.program.link_flags == ("-static-libstdc++",)
+    assert findings.problems == []
 
 
 def test_settings_cxy_would_add(tmp_path):

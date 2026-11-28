@@ -304,6 +304,93 @@ def test_conditional_settings(tmp_path):
     assert output.strip() == f"{system} release"
 
 
+OTHER_PROFILES = {
+    "windows": "os=Windows\ncompiler=msvc\ncompiler.version=194\ncompiler.runtime=dynamic\n",
+    "linux": "os=Linux\ncompiler=gcc\ncompiler.version=13\ncompiler.libcxx=libstdc++11\n",
+}
+
+
+@pytest.mark.e2e
+def test_conditional_dependencies(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    manifest = project / "cxy.toml"
+    with manifest.open("a", encoding="utf-8") as file:
+        file.write(
+            '\n[when.unix.dependencies]\ncli11 = "2.5.0"\n'
+            '\n[when.windows.dependencies]\nargparse = "2.9"\n'
+        )
+    (project / "src" / "main.cpp").write_text(
+        "#include <iostream>\n"
+        '#ifdef _WIN32\n#include <argparse/argparse.hpp>\n#define USING "argparse"\n'
+        '#else\n#include <CLI/CLI.hpp>\n#define USING "cli11"\n#endif\n'
+        "int main() { std::cout << USING << '\\n'; }\n"
+    )
+    windows = sys.platform == "win32"
+    used, unused = ("argparse", "cli11") if windows else ("cli11", "argparse")
+
+    run = cxy("run", cwd=project)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == used
+    # Building recorded the CMake names that export needs where the package isn't needed.
+    lock = json.loads((project / "cxy.lock").read_text())
+    assert list(lock["cmake"]) == [used]
+    assert set(lock["inputs"]["when"]) == {"unix", "windows"}
+
+    export = cxy("export", cwd=project)
+    assert export.returncode == 1
+    assert f"cxy does not know the CMake names of {unused}" in export.stderr
+    names = {
+        "argparse": '{ package = "argparse", targets = ["argparse::argparse"] }',
+        "cli11": '{ package = "CLI11", targets = ["CLI11::CLI11"] }',
+    }
+    text = manifest.read_text()
+    text = text.replace(
+        f'{unused} = "{"2.9" if unused == "argparse" else "2.5.0"}"',
+        f'{unused} = {{ version = "{"2.9" if unused == "argparse" else "2.5.0"}", '
+        f"cmake = {names[unused]} }}",
+    )
+    manifest.write_text(text)
+    export = cxy("export", cwd=project)
+    assert export.returncode == 0, export.stdout + export.stderr
+    cmakelists = (project / "CMakeLists.txt").read_text()
+    assert "$<$<PLATFORM_ID:Windows>:argparse::argparse>" in cmakelists
+    assert "$<$<NOT:$<PLATFORM_ID:Windows>>:CLI11::CLI11>" in cmakelists
+
+    # One machine can lock for every platform.
+    profiles = []
+    for name, settings in OTHER_PROFILES.items():
+        path = tmp_path / name
+        path.write_text(
+            f"[settings]\narch=x86_64\nbuild_type=Release\n{settings}compiler.cppstd=20\n"
+        )
+        profiles += ["--profile", str(path)]
+    locked = cxy("lock", "--profile", "default", *profiles, cwd=project)
+    assert locked.returncode == 0, locked.stdout + locked.stderr
+    requires = json.loads((project / "cxy.lock").read_text())["conan"]["requires"]
+    assert {ref.partition("/")[0] for ref in requires} >= {"argparse", "cli11"}
+    assert cxy("build", "--locked", cwd=project).returncode == 0
+
+    # The exported project builds without cxy, finding only what this platform needs.
+    (project / "cxy.toml").rename(tmp_path / "cxy.toml")
+    generator = "tools.cmake.cmaketoolchain:generator=Ninja"
+    settings = ("--build=missing", "-s", "compiler.cppstd=20", "-c", generator)
+    for command in (
+        ("conan", "install", ".", *settings),
+        ("cmake", "--preset", "conan-release"),
+        ("cmake", "--build", "--preset", "conan-release"),
+    ):
+        done = subprocess.run(command, cwd=project, capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+    program = next(
+        path
+        for path in (project / "build" / "Release").rglob("demo*")
+        if path.is_file() and path.name in ("demo", "demo.exe")
+    )
+    output = subprocess.run([program], capture_output=True, text=True, check=True).stdout
+    assert output.strip() == used
+
+
 @pytest.mark.e2e
 def test_export_builds_without_cxy(tmp_path):
     cxy("new", "demo", cwd=tmp_path)

@@ -98,14 +98,18 @@ clang-format = "18.1.8"
 [build]                # optional, for everything compiled, tests included
 defines = ["USE_SIMD", 'LOG_LEVEL="info"']
 flags = ["-Wall"]      # passed to the compiler as they are
+link-flags = ["-Wl,--as-needed"]  # passed to the linker as they are
+system-libs = ["m"]    # libraries of the system, without -l or .lib
 
 [lib]                  # optional, for the library
 shared = true          # build a shared library; by default it is static
 defines = ["HAVE_HDF5"]
 flags = ["-O3"]
+system-libs = ["dl"]
 
 [bin]                  # optional, for the application
 defines = ["APP_NAME=\"hello\""]
+link-flags = ["-static-libstdc++"]
 
 [layout]               # defaults
 lib = "lib"
@@ -124,6 +128,9 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - Definitions in `[lib]` reach whatever uses the library, since its headers may depend on them:
   the application and the tests. Those in `[bin]` reach the tests that use the application's
   code. Flags in `[lib]` and `[bin]` apply only to their own sources.
+- System libraries in `[lib]` are linked with whatever uses the library, and those in `[bin]`
+  with the tests that use the application's code. Link flags in `[bin]` apply only to the
+  application; libraries have none of their own, so use `[build]` for a shared library's.
 - Definitions are `NAME` or `NAME=value`, without `-D`. Flags are not portable between compilers.
 - On Windows, a shared library exports all its functions, so that it needs no export macros, but
   not its global variables.
@@ -148,6 +155,12 @@ defines = ["TRACE"]
 
 [when.'all(windows, msvc)'.lib.core]   # for [lib.core]
 defines = ["CORE_USE_WINAPI"]
+
+[when.windows.lib]
+system-libs = ["ws2_32"]
+
+[when.windows.dependencies]            # also dev-dependencies
+wil = "1.0.240803.1"
 ```
 
 - A condition is `windows`, `linux`, `macos` or `unix` (any system but Windows); `msvc`, `gcc`,
@@ -155,7 +168,11 @@ defines = ["CORE_USE_WINAPI"]
   such as `os = "FreeBSD"`. `all(...)`, `any(...)` and `not(...)` combine them. `clang` is not
   Apple's Clang, as for Conan and CMake.
 - Each table may have `build`, `lib` and `bin` tables, or `lib.NAME` and `bin.NAME` for named
-  libraries and programs, with `defines` and `flags`. These are added to the others.
+  libraries and programs, with `defines`, `flags`, `link-flags` and `system-libs`. These are
+  added to the others.
+- It may also have `dependencies` and `dev-dependencies`, which are needed only then. A
+  dependency is either always needed or needed under one condition, and cannot depend on the
+  build type. `cxy add --when windows wil` adds one.
 - cxy tests the conditions against the settings of the Conan profile it builds with. `cxy export`
   writes them as CMake conditions, such as `if(WIN32)` or `$<CONFIG:Debug>`, so the exported
   project chooses the same way.
@@ -217,12 +234,20 @@ cxy lock                         # update it without building
 cxy lock --upgrade               # newest versions that cxy.toml allows
 cxy lock --upgrade-package fmt   # ...of one package
 cxy lock --check                 # fail if it is out of date
+cxy lock --profile default --profile windows   # for several platforms at once
 cxy build --locked               # ...and likewise for other commands, for use in CI
 ```
 
-Dependencies can differ between platforms, and a lock covers only those it was made on. Run
-`cxy lock` on each: it adds what is missing. Changing dependencies in `cxy.toml` removes entries
-that are not needed on the current platform.
+Dependencies can differ between platforms, as with `[when.windows.dependencies]`, and a lock
+covers only the platforms it was made for. Run `cxy lock` on each, which adds what is missing, or
+lock them all at once with a Conan profile for each: locking resolves versions without building
+anything, so it works for other systems and compilers. Changing dependencies in `cxy.toml`
+removes entries that are not needed on the first of them.
+
+`cxy export` needs the CMake names of every dependency, which Conan gives only where the package
+is needed. Each build records those of conditional dependencies in `cxy.lock`. For a package that
+has never been built, set them in `cxy.toml`:
+`wil = { version = "...", cmake = { package = "wil", targets = ["WIL::WIL"] } }`.
 
 ## Testing
 

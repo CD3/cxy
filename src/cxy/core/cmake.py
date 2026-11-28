@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from cxy.core import conan, conditions, frameworks
@@ -68,6 +69,7 @@ def cmakelists(
         return quote(relative) if root is None else '"${ROOT_DIR}/' + quote(relative)[1:]
 
     dependency_targets = _targets(manifest.dependencies, graph)
+    dependency_targets += _conditional_targets(manifest, graph, dev=False)
     library_targets = {found.component.name: found.component.target for found in libraries}
 
     def links(component: Component) -> list[str]:
@@ -95,23 +97,14 @@ def cmakelists(
         'set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")',
         "",
     ]
-    build = manifest.build
-    if build.defines or build.flags:
-        out += _values("add_compile_definitions", [], build.defines)
-        out += _values("add_compile_options", [], build.flags)
-        out.append("")
+    if manifest.build:
+        out += [*_everything(manifest.build), ""]
     for conditional in manifest.when:
-        settings = conditional.build
-        if settings.defines or settings.flags:
-            out += _when(
-                conditional.condition,
-                lambda condition, s=settings: [
-                    *_values("add_compile_definitions", [], s.defines, condition),
-                    *_values("add_compile_options", [], s.flags, condition),
-                ],
-            )
+        if settings := conditional.build:
+            out += _when(conditional.condition, lambda c, s=settings: _everything(s, c))
             out.append("")
     out += _find_packages(manifest.dependencies, graph)
+    out += _conditional_packages(manifest, graph, dev=False)
 
     # Static libraries that go into a shared one must be position-independent code.
     by_name = {found.component.name: found.component for found in libraries}
@@ -170,9 +163,12 @@ def cmakelists(
             out += _call("target_include_directories", [lib, "INTERFACE", include_dir])
             scope = "INTERFACE"
         out += _call("target_compile_features", [lib, scope, standard])
-        out += _definitions(lib, scope, settings.defines)
-        out += _options(lib, "PRIVATE", settings.flags)
-        out += _conditional_settings(conditional_settings[lib], lib, scope, "PRIVATE")
+        out += _all_settings(
+            lib,
+            settings,
+            conditional_settings[lib],
+            _Scopes(definitions=scope, options="PRIVATE", libraries=scope),
+        )
         out += _link(lib, scope, links(component))
         out.append("")
 
@@ -189,10 +185,14 @@ def cmakelists(
             out += _call("add_library", [app, "OBJECT"], map(path, found.sources))
             out += _call("target_include_directories", [app, "PUBLIC", src_dir])
             out += _call("target_compile_features", [app, "PUBLIC", standard])
-            # Tests that link the objects see the same definitions.
-            out += _definitions(app, "PUBLIC", settings.defines)
-            out += _options(app, "PRIVATE", settings.flags)
-            out += _conditional_settings(conditional_settings[exe], app, "PUBLIC", "PRIVATE")
+            # Tests that link the objects see the same definitions, and need the same
+            # libraries. The program's own link options are for it alone.
+            out += _all_settings(
+                app,
+                settings,
+                conditional_settings[exe],
+                _Scopes(definitions="PUBLIC", options="PRIVATE", libraries="PUBLIC"),
+            )
             out += _link(app, "PUBLIC", exe_links)
             exe_links = [app, *exe_links]
             objects.append(app)
@@ -201,14 +201,11 @@ def cmakelists(
         if src_dir is not None:
             out += _call("target_include_directories", [exe, "PRIVATE", src_dir])
         out += _call("target_compile_features", [exe, "PRIVATE", standard])
-        if not found.sources:
-            out += _definitions(exe, "PRIVATE", settings.defines)
-        out += _options(exe, "PRIVATE", settings.flags)
-        own = conditional_settings[exe]
+        scopes = _Scopes("PRIVATE", "PRIVATE", "PRIVATE", "PRIVATE")
         if found.sources:
-            # The definitions come with the objects.
-            own = [(c, Settings(flags=extra.flags)) for c, extra in own]
-        out += _conditional_settings(own, exe, "PRIVATE", "PRIVATE")
+            # The definitions and libraries come with the objects.
+            scopes = _Scopes(options="PRIVATE", link_options="PRIVATE")
+        out += _all_settings(exe, settings, conditional_settings[exe], scopes)
         out += _link(exe, "PRIVATE", exe_links)
         out.append("")
     app_links = [*objects, *(list(library_targets.values()) or dependency_targets)]
@@ -224,6 +221,7 @@ def cmakelists(
     built = [found.component.settings for found in (*libraries, *executables)]
     isolated_defines = list(dict.fromkeys(d for settings in built for d in settings.defines))
     isolated_flags = list(dict.fromkeys(f for settings in built for f in settings.flags))
+    isolated_libs = list(dict.fromkeys(f for settings in built for f in settings.system_libs))
 
     if programs:
         dev = {d.name: d for d in manifest.dev_dependencies}
@@ -234,7 +232,11 @@ def cmakelists(
         # library before these, but that has no reason to have one.)
         def test_links(program: TestProgram) -> list[str]:
             framework = program.framework
-            return [*framework.links(dev[framework.package], graph), *_targets(others, graph)]
+            return [
+                *framework.links(dev[framework.package], graph),
+                *_targets(others, graph),
+                *_conditional_targets(manifest, graph, dev=True),
+            ]
 
         # CTest runs tests in the build directory by default.
         test_directory = []
@@ -246,6 +248,7 @@ def cmakelists(
 
         modules = dict.fromkeys(program.framework.cmake_module for program in programs)
         body = _find_packages(dev.values(), graph)
+        body += _conditional_packages(manifest, graph, dev=True)
         body += [f"include({module})" for module in modules]
         for program in programs:
             target = program.target
@@ -278,6 +281,7 @@ def cmakelists(
             body += _call("target_compile_features", [target, "PRIVATE", standard])
             body += _definitions(target, "PRIVATE", isolated_defines)
             body += _options(target, "PRIVATE", isolated_flags)
+            body += _values("target_link_libraries", [target, "PRIVATE"], isolated_libs)
             body += _link(target, "PRIVATE", [*test_links(program), *dependency_targets])
         out += ["if(BUILD_TESTING)", *(f"  {line}" if line else "" for line in body), "endif()"]
     return "\n".join(out).rstrip() + "\n"
@@ -354,23 +358,54 @@ def _when(condition: Condition, body: _Body) -> list[str]:
     return [f"if({conditions.cmake_if(condition)})", *(f"  {line}" for line in lines), "endif()"]
 
 
-def _conditional_settings(
-    conditional: Sequence[tuple[Conditional, Settings]],
-    target: str,
-    definitions: str,
-    options: str,
+@dataclass(frozen=True)
+class _Scopes:
+    """The scopes in which a target gets each kind of setting, or None for those it doesn't."""
+
+    definitions: str | None = None
+    options: str | None = None
+    link_options: str | None = None
+    libraries: str | None = None
+
+
+def _target_settings(
+    target: str, settings: Settings, scopes: _Scopes, condition: Condition | None = None
 ) -> list[str]:
-    """A target's settings from [when] tables, with the scopes of its definitions and options."""
     out: list[str] = []
-    for when, settings in conditional:
-        out += _when(
-            when.condition,
-            lambda condition, s=settings: [
-                *_definitions(target, definitions, s.defines, condition),
-                *_options(target, options, s.flags, condition),
-            ],
-        )
+    if scopes.definitions:
+        out += _definitions(target, scopes.definitions, settings.defines, condition)
+    if scopes.options:
+        out += _options(target, scopes.options, settings.flags, condition)
+    if scopes.link_options:
+        arguments = [target, scopes.link_options]
+        out += _values("target_link_options", arguments, settings.link_flags, condition)
+    if scopes.libraries:
+        arguments = [target, scopes.libraries]
+        out += _values("target_link_libraries", arguments, settings.system_libs, condition)
     return out
+
+
+def _all_settings(
+    target: str,
+    settings: Settings,
+    conditional: Sequence[tuple[Conditional, Settings]],
+    scopes: _Scopes,
+) -> list[str]:
+    """A target's settings, then those from [when] tables."""
+    out = _target_settings(target, settings, scopes)
+    for when, extra in conditional:
+        out += _when(when.condition, lambda c, e=extra: _target_settings(target, e, scopes, c))
+    return out
+
+
+def _everything(settings: Settings, condition: Condition | None = None) -> list[str]:
+    """Settings for every target, which must come before the targets."""
+    return [
+        *_values("add_compile_definitions", [], settings.defines, condition),
+        *_values("add_compile_options", [], settings.flags, condition),
+        *_values("add_link_options", [], settings.link_flags, condition),
+        *_values("link_libraries", [], settings.system_libs, condition),
+    ]
 
 
 _SPECIAL_IN_EXPRESSION = {">": "$<ANGLE-R>", ",": "$<COMMA>", ";": "$<SEMICOLON>"}
@@ -385,6 +420,32 @@ def _in_expression(value: str) -> str:
 def _find_packages(dependencies: Iterable[Dependency], graph: Mapping[str, CMakeInfo]) -> list[str]:
     packages = dict.fromkeys(conan.resolve(d, graph).package for d in dependencies)
     return [f"find_package({package} REQUIRED CONFIG)" for package in packages]
+
+
+def _conditional_packages(
+    manifest: Manifest, graph: Mapping[str, CMakeInfo], *, dev: bool
+) -> list[str]:
+    """Find the packages that are needed only when a condition holds."""
+    out: list[str] = []
+    for conditional in manifest.when:
+        dependencies = conditional.dev_dependencies if dev else conditional.dependencies
+        if dependencies:
+            found = _find_packages(dependencies, graph)
+            out += _when(conditional.condition, lambda _, found=found: found)
+    return out
+
+
+def _conditional_targets(
+    manifest: Manifest, graph: Mapping[str, CMakeInfo], *, dev: bool
+) -> list[str]:
+    """The targets of packages that are needed only when a condition holds, which are linked
+    only then."""
+    targets: list[str] = []
+    for conditional in manifest.when:
+        dependencies = conditional.dev_dependencies if dev else conditional.dependencies
+        test = conditions.generator_expression(conditional.condition)
+        targets += [f"$<{test}:{target}>" for target in _targets(dependencies, graph)]
+    return targets
 
 
 def _targets(dependencies: Iterable[Dependency], graph: Mapping[str, CMakeInfo]) -> list[str]:

@@ -16,6 +16,7 @@ def add(
         tuple[str, ...], Parameter(name=["--option", "-o"], negative="")
     ] = (),
     force_version: Annotated[bool, Parameter(negative="")] = False,
+    when: str | None = None,
     options: ResolveOptions | None = None,
 ) -> None:
     """Add dependencies to cxy.toml, or change their versions.
@@ -32,6 +33,9 @@ def add(
         A Conan option for the package, such as ``shared=true``. May be repeated.
     force_version
         Use this version even if other dependencies ask for a different one.
+    when
+        Only when a condition holds, such as ``windows`` or ``'any(gcc, clang)'``: add to
+        that [when] table.
     """
     if not packages:
         raise CxyError("name at least one package to add")
@@ -49,7 +53,7 @@ def add(
         for package in packages
     ]
     core = (options or ResolveOptions()).to_core()
-    dependencies.add(Project.find(), requests, core, section)
+    dependencies.add(Project.find(), requests, core, section, when)
 
 
 def remove(*packages: str, options: ResolveOptions | None = None) -> None:

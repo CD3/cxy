@@ -23,6 +23,10 @@ DEPENDENCIES = "dependencies"
 DEV_DEPENDENCIES = "dev-dependencies"
 OVERRIDES = "overrides"
 SECTIONS = (DEPENDENCIES, DEV_DEPENDENCIES, OVERRIDES)
+WHEN = "when"
+
+Location = tuple[str, ...]
+"""Where a dependency is: its section, or ("when", condition, section)."""
 
 # Ordinary releases, as opposed to pre-releases, variants and dated snapshots.
 _RELEASE = re.compile(r"\d+(\.\d+)*[a-z]?")
@@ -55,7 +59,12 @@ def add(
     requests: Sequence[Request],
     options: BuildOptions,
     section: str = DEPENDENCIES,
+    when: str | None = None,
 ) -> None:
+    """Add dependencies to a section, or with ``when``, to that section of a [when] table."""
+    if when is not None and section == OVERRIDES:
+        raise CxyError("an override applies everywhere; it cannot have a condition")
+    path: Location = (section,) if when is None else (WHEN, when, section)
     resolved = []
     for request in requests:
         manifests.check_dependency_name(request.name)
@@ -63,10 +72,10 @@ def add(
         resolved.append(Request(request.name, version, request.options, request.force))
     text = _read(project)
     for request in resolved:
-        text = add_to(text, section, request)
+        text = add_to(text, path, request)
     _apply(project, text, options)
     for request in resolved:
-        tools.status("Added", f"{request.name} {request.version} to {section}")
+        tools.status("Added", f"{request.name} {request.version} to {describe(path)}")
     if section == OVERRIDES:
         _warn_if_unused(project, [request.name for request in resolved])
 
@@ -75,27 +84,52 @@ def remove(project: Project, names: Sequence[str], options: BuildOptions) -> Non
     text = _read(project)
     removed = []
     for name in names:
-        section = find_section(tomllib.loads(text), name)
-        text = remove_from(text, name)
-        removed.append((name, section))
+        if not find_sections(tomllib.loads(text), name):
+            raise CxyError(f"{name} is not in {', '.join(SECTIONS[:-1])} or {SECTIONS[-1]}")
+        while path := find_section(tomllib.loads(text), name):
+            text = remove_from(text, name)
+            removed.append((name, path))
     _apply(project, text, options)
-    for name, section in removed:
-        tools.status("Removed", f"{name} from {section}")
+    for name, path in removed:
+        tools.status("Removed", f"{name} from {describe(path)}")
 
 
-def find_section(data: Mapping[str, Any], name: str) -> str | None:
-    return next((section for section in SECTIONS if name in data.get(section, {})), None)
+def find_sections(data: Mapping[str, Any], name: str) -> list[Location]:
+    """Where a dependency is, including the [when] tables."""
+    found: list[Location] = [(section,) for section in SECTIONS if name in data.get(section, {})]
+    for condition, table in data.get(WHEN, {}).items():
+        for section in (DEPENDENCIES, DEV_DEPENDENCIES):
+            if isinstance(table, dict) and name in table.get(section, {}):
+                found.append((WHEN, condition, section))
+    return found
 
 
-def add_to(text: str, section: str, request: Request) -> str:
+def find_section(data: Mapping[str, Any], name: str) -> Location | None:
+    return next(iter(find_sections(data, name)), None)
+
+
+def describe(path: Location) -> str:
+    return ".".join(map(manifests.toml_key, path))
+
+
+def _get(data: Mapping[str, Any], path: Location) -> Mapping[str, Any]:
+    for key in path:
+        data = data.get(key, {})
+    return data
+
+
+def add_to(text: str, path: Location | str, request: Request) -> str:
     """Return the manifest text with a dependency added or updated."""
+    if isinstance(path, str):
+        path = (path,)
+    section = path[-1]
     data = tomllib.loads(text)
     current = find_section(data, request.name)
-    if current not in (None, section):
-        raise CxyError(_wrong_section(request.name, current, section))
+    if current not in (None, path):
+        raise CxyError(_wrong_section(request.name, current, path))
     if section == OVERRIDES and (request.options or request.force):
         raise CxyError("an override is only a version; it cannot have options or be forced")
-    old = data.get(section, {}).get(request.name)
+    old = _get(data, path).get(request.name)
     table: dict[str, Any] = copy.deepcopy(old) if isinstance(old, dict) else {}
     table["version"] = request.version
     if request.options:
@@ -104,34 +138,41 @@ def add_to(text: str, section: str, request: Request) -> str:
         table["force"] = True
     value = request.version if not isinstance(old, dict) and len(table) == 1 else table
     expected = copy.deepcopy(data)
-    expected.setdefault(section, {})[request.name] = value
+    place = expected
+    for key in path:
+        place = place.setdefault(key, {})
+    place[request.name] = value
 
     document: Any = tomlkit.parse(text)
-    if section not in document:
-        document[section] = tomlkit.table()
+    container = document
+    for depth, key in enumerate(path):
+        if key not in container:
+            # [when.windows.dependencies] needs no [when] or [when.windows] header.
+            container[key] = tomlkit.table(is_super_table=depth < len(path) - 1)
+        container = container[key]
     if isinstance(old, dict):
         # Change only what is different, to keep the entry's comments and layout.
-        entry = document[section][request.name]
+        entry = container[request.name]
         for key, item in table.items():
             if old.get(key) != item:
                 entry[key] = _inline(item)
     else:
-        document[section][request.name] = _inline(value)
+        container[request.name] = _inline(value)
     return _checked(document, expected)
 
 
-def _wrong_section(name: str, current: str | None, wanted: str) -> str:
-    if wanted == OVERRIDES:
+def _wrong_section(name: str, current: Location, wanted: Location) -> str:
+    if wanted == (OVERRIDES,):
         return (
-            f"{name} is already in {current}, so it cannot be overridden; "
+            f"{name} is already in {describe(current)}, so it cannot be overridden; "
             "add it there with --force-version instead"
         )
-    if current == OVERRIDES:
+    if current == (OVERRIDES,):
         return (
             f"{name} is in {OVERRIDES}, which is only for indirect dependencies; "
             "remove it first, or use --override to change its version"
         )
-    return f"{name} is already in {current}; remove it first"
+    return f"{name} is already in {describe(current)}; remove it first"
 
 
 def _warn_if_unused(project: Project, names: Sequence[str]) -> None:
@@ -146,13 +187,21 @@ def _warn_if_unused(project: Project, names: Sequence[str]) -> None:
 def remove_from(text: str, name: str) -> str:
     """Return the manifest text with a dependency removed."""
     data = tomllib.loads(text)
-    section = find_section(data, name)
-    if section is None:
+    path = find_section(data, name)
+    if path is None:
         raise CxyError(f"{name} is not in {', '.join(SECTIONS[:-1])} or {SECTIONS[-1]}")
     expected = copy.deepcopy(data)
-    del expected[section][name]
     document: Any = tomlkit.parse(text)
-    del document[section][name]
+    for tree in (expected, document):
+        tables = [tree]
+        for key in path:
+            tables.append(tables[-1][key])
+        del tables[-1][name]
+        # Remove the [when] tables that are left empty.
+        if path[0] == WHEN:
+            for depth in range(len(path), 0, -1):
+                if not tables[depth]:
+                    del tables[depth - 1][path[depth - 1]]
     return _checked(document, expected)
 
 

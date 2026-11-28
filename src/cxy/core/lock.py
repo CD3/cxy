@@ -6,7 +6,7 @@ recipe's, even in strict mode. Recording the settings lets cxy notice that they 
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,9 @@ _SECTIONS = ("requires", "build_requires", "python_requires", "config_requires")
 class Lock:
     inputs: Mapping[str, Any]
     conan: Mapping[str, Any]
+    cmake: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    """The CMake package and target of each dependency that is needed only when a condition
+    holds, as seen where it was, for export on platforms without it."""
 
     @classmethod
     def load(cls, path: Path) -> "Lock | None":
@@ -30,7 +33,8 @@ class Lock:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            version, lock = data["version"], cls(data["inputs"], data["conan"])
+            version = data["version"]
+            lock = cls(data["inputs"], data["conan"], data.get("cmake", {}))
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise CxyError(
                 f"cannot read {path}: {error}; fix it, or delete it to lock again"
@@ -40,7 +44,9 @@ class Lock:
         return lock
 
     def save(self, path: Path) -> bool:
-        data = {"version": _VERSION, "inputs": self.inputs, "conan": self.conan}
+        data: dict[str, Any] = {"version": _VERSION, "inputs": self.inputs, "conan": self.conan}
+        if self.cmake:
+            data["cmake"] = {name: dict(self.cmake[name]) for name in sorted(self.cmake)}
         return write_if_changed(path, json.dumps(data, indent=4) + "\n")
 
     def matches(self, manifest: Manifest) -> bool:
@@ -61,7 +67,7 @@ class Lock:
     def without_overrides(self) -> "Lock":
         """Forget overrides, so that Conan takes them from the recipe."""
         conan = {key: value for key, value in self.conan.items() if key != "overrides"}
-        return Lock(self.inputs, conan)
+        return replace(self, conan=conan)
 
     def without_package(self, name: str) -> "Lock":
         if name not in self.packages():
@@ -70,15 +76,38 @@ class Lock:
         for section in _SECTIONS:
             if section in conan:
                 conan[section] = [r for r in conan[section] if r.partition("/")[0] != name]
-        return Lock(self.inputs, conan)
+        return replace(self, conan=conan)
 
 
 def inputs(manifest: Manifest) -> dict[str, Any]:
-    """Return the manifest settings that determine which packages are needed."""
-    return {
+    """Return the manifest settings that determine which packages are needed, on every
+    platform, whether or not the manifest's conditions have been resolved."""
+    manifest = manifest.declared or manifest
+    result: dict[str, Any] = {
         "dependencies": _describe(manifest.dependencies),
         "dev-dependencies": _describe(manifest.dev_dependencies),
         "overrides": dict(sorted(manifest.overrides.items())),
+    }
+    when = {
+        conditional.text: {
+            "dependencies": _describe(conditional.dependencies),
+            "dev-dependencies": _describe(conditional.dev_dependencies),
+        }
+        for conditional in manifest.when
+        if conditional.dependencies or conditional.dev_dependencies
+    }
+    if when:
+        result["when"] = when
+    return result
+
+
+def conditional_names(manifest: Manifest) -> set[str]:
+    """The dependencies that are needed only when a condition holds."""
+    manifest = manifest.declared or manifest
+    return {
+        dependency.name
+        for conditional in manifest.when
+        for dependency in (*conditional.dependencies, *conditional.dev_dependencies)
     }
 
 

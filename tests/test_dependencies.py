@@ -149,3 +149,23 @@ def test_failure_to_lock_restores_the_manifest(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         dependencies.remove(Project.find(tmp_path), ["fmt"], dependencies.BuildOptions())
     assert (tmp_path / "cxy.toml").read_text() == TEXT
+
+
+def test_conditional_dependencies():
+    path = ("when", "windows", "dependencies")
+    added = add_to(TEXT, path, Request("wil", "1"))
+    assert added == TEXT + '\n[when.windows.dependencies]\nwil = "1"\n'
+    assert dependencies.find_section(__import__("tomllib").loads(added), "wil") == path
+    again = add_to(added, ("when", "any(gcc, clang)", "dev-dependencies"), Request("rc", "2"))
+    assert again.endswith('\n[when."any(gcc, clang)".dev-dependencies]\nrc = "2"\n')
+    assert add_to(added, path, Request("wil", "2")) == added.replace('wil = "1"', 'wil = "2"')
+    with pytest.raises(CxyError, match=r"wil is already in when\.windows\.dependencies"):
+        add_to(added, "dependencies", Request("wil", "1"))
+    with pytest.raises(CxyError, match="fmt is already in dependencies"):
+        add_to(TEXT, path, Request("fmt", "1"))
+    # Removing the last one removes its table.
+    assert remove_from(added, "wil") == TEXT + "\n"
+    assert remove_from(again, "rc") == added + "\n"
+    assert dependencies.describe(("when", "any(gcc, clang)", "dependencies")) == (
+        "when.'any(gcc, clang)'.dependencies"
+    )

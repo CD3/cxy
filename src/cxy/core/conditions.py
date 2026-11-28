@@ -220,6 +220,30 @@ def generator_expression(condition: Condition) -> str:
             return f"$<NOT:{generator_expression(part)}>"
 
 
+def python(condition: Condition) -> str:
+    """The condition as Python in a Conan recipe."""
+    match condition:
+        case Is(key, value):
+            return f"self.settings.{key} == {value!r}"
+        case All(parts):
+            return " and ".join(_python_grouped(part) for part in parts)
+        case Any(parts):
+            return " or ".join(_python_grouped(part) for part in parts)
+        case Not(part):
+            return f"not {_python_grouped(part)}"
+
+
+def _python_grouped(condition: Condition) -> str:
+    text = python(condition)
+    return f"({text})" if isinstance(condition, All | Any) and len(condition.parts) > 1 else text
+
+
+def can_both_hold(first: Condition, second: Condition) -> bool:
+    """Whether two conditions can be true for the same configuration."""
+    both = All((first, second))
+    return any(evaluate(both, settings) for settings in combinations(both))
+
+
 def needs_generator_expression(condition: Condition) -> bool:
     """Whether CMake can only tell at build time, since multi-config generators choose then."""
     return "build_type" in keys(condition)

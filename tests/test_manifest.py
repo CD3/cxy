@@ -212,3 +212,84 @@ def test_conditional_settings_of_the_layout():
 def test_conditional_errors(extra, message):
     with pytest.raises(CxyError, match=message):
         parse(PACKAGE + extra)
+
+
+def test_link_settings():
+    manifest = parse(
+        PACKAGE
+        + '[build]\nlink-flags = ["-Wl,--as-needed"]\nsystem-libs = ["m", "m"]\n'
+        + '[lib]\nsystem-libs = ["dl"]\n[bin]\nlink-flags = ["-static"]\n'
+        + '[when.windows.lib]\nsystem-libs = ["ws2_32"]\n'
+    )
+    assert manifest.build.link_flags == ("-Wl,--as-needed",)
+    assert manifest.build.system_libs == ("m",)
+    library, program = manifest.resolve({"os": "Windows"}).components
+    assert library.settings.system_libs == ("dl", "ws2_32")
+    assert program.settings.link_flags == ("-static",)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('[lib]\nlink-flags = ["-s"]\n', "only programs have their own link options"),
+        ('[lib.a]\nsources = "a"\nlink-flags = ["-s"]\n', "lib.a.link-flags: only programs"),
+        ('[when.linux.lib]\nlink-flags = ["-s"]\n', "when.linux.lib.link-flags: only programs"),
+        (
+            '[build]\nlink-flags = ["-lws2_32"]\n',
+            "put '-lws2_32' in build.system-libs, as 'ws2_32'",
+        ),
+        ('[bin]\nlink-flags = ["ws2_32.lib"]\n', "in bin.system-libs, as 'ws2_32'"),
+        ('[build]\nsystem-libs = ["-ldl"]\n', "write '-ldl' as 'dl'"),
+        ('[build]\nsystem-libs = ["bcrypt.lib"]\n', "write 'bcrypt.lib' as 'bcrypt'"),
+        ('[build]\nsystem-libs = ["-framework Cocoa"]\n', "not the name of a library"),
+    ],
+)
+def test_link_setting_errors(extra, message):
+    with pytest.raises(CxyError, match=message):
+        parse(PACKAGE + extra)
+
+
+def test_conditional_dependencies():
+    manifest = parse(
+        PACKAGE
+        + '[dependencies]\nfmt = "11.0.2"\n'
+        + '[when.windows.dependencies]\nwil = { version = "1.0", options = { x = true } }\n'
+        + '[when.unix.dependencies]\nwil = "2.0"\n'
+        + '[when.linux.dev-dependencies]\nrapidcheck = "1.0"\n'
+    )
+    windows = manifest.resolve({"os": "Windows", "compiler": "msvc"})
+    assert [d.ref for d in windows.dependencies] == ["fmt/11.0.2", "wil/1.0"]
+    assert windows.dev_dependencies == ()
+    assert windows.declared is manifest
+    assert windows.resolve({}).declared is manifest
+    linux = manifest.resolve({"os": "Linux", "compiler": "gcc"})
+    assert [d.ref for d in linux.dependencies] == ["fmt/11.0.2", "wil/2.0"]
+    assert [d.ref for d in linux.dev_dependencies] == ["rapidcheck/1.0"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (
+            '[dependencies]\nwil = "1"\n[when.windows.dependencies]\nwil = "1"\n',
+            "when.windows.dependencies.wil: wil is also in \\[dependencies\\]",
+        ),
+        (
+            '[overrides]\nwil = "1"\n[when.windows.dependencies]\nwil = "1"\n',
+            "also in \\[overrides\\]",
+        ),
+        (
+            '[when.windows.dependencies]\nwil = "1"\n[when.msvc.dev-dependencies]\nwil = "1"\n',
+            "also in \\[when.windows\\], and both can apply",
+        ),
+        (
+            '[when.\'build_type = "Debug"\'.dependencies]\nwil = "1"\n',
+            "cannot depend on the build type",
+        ),
+        ('[when.windows.dev-dependencies]\ncatch2 = "3.7.1"\n', "a test framework must be"),
+        ("[when.windows.dependencies]\nwil = 1\n", "when.windows.dependencies.wil must be"),
+    ],
+)
+def test_conditional_dependency_errors(extra, message):
+    with pytest.raises(CxyError, match=message):
+        parse(PACKAGE + extra)

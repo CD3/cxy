@@ -206,7 +206,7 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
     """Write Conan and CMake files to the project root for use without cxy."""
     sources = project.sources()
     directory = _prepare(project, options, sources)
-    graph = _install(project, options, directory)
+    graph = _export_names(project, _install(_for_host(project, options), options, directory))
     files = {
         project.root / "conanfile.py": conan.conanfile(
             project.manifest,
@@ -245,6 +245,39 @@ def export(project: Project, options: BuildOptions, force: bool = False) -> None
     write_if_changed(record, json.dumps({path.name: digest(path) for path in files}, indent=4))
 
 
+def _export_names(project: Project, graph: Mapping[str, CMakeInfo]) -> dict[str, CMakeInfo]:
+    """Add the CMake names of dependencies that this platform doesn't need, as cxy.lock
+    recorded them where they were needed."""
+    lock = Lock.load(project.root / locks.FILENAME)
+    recorded = lock.cmake if lock is not None else {}
+    names = dict(graph)
+    manifest = project.manifest
+    for conditional in manifest.when:
+        for dependency in (*conditional.dependencies, *conditional.dev_dependencies):
+            name = dependency.name
+            if name in names or dependency.cmake_targets:
+                continue
+            if name in recorded:
+                names[name] = CMakeInfo(recorded[name]["package"], recorded[name]["target"])
+                continue
+            where = f"{conditional.where}.dependencies.{name}"
+            raise CxyError(
+                f"cxy does not know the CMake names of {name}, which this platform doesn't "
+                f"need: build once where it is needed, which records them in {locks.FILENAME}, "
+                f'or set them in {where}, as cmake = {{ package = "...", targets = ["..."] }}'
+            )
+    return names
+
+
+def _for_host(project: Project, options: BuildOptions) -> Project:
+    """The project as built with a profile, with its conditions resolved."""
+    if not project.manifest.when:
+        return project
+    directory = project.build_dir / options.build_type.lower()
+    settings = host_settings(project, options, directory)
+    return replace(project, manifest=project.manifest.resolve(settings))
+
+
 def _read_exported(record: Path) -> dict[str, str]:
     try:
         data = json.loads(record.read_text(encoding="utf-8"))
@@ -260,21 +293,53 @@ def lock(
     check: bool = False,
     upgrade: bool = False,
     upgrade_packages: Sequence[str] = (),
+    profiles: Sequence[str] = (),
 ) -> None:
-    """Bring cxy.lock up to date without installing anything."""
+    """Bring cxy.lock up to date without installing anything.
+
+    With several ``profiles``, cxy.lock covers them all, so that one machine can lock what
+    other platforms need.
+    """
     create_build_dir(project)
-    ensure_profile(project, options)
-    conanfile = _write_conanfile(project)
-    directory = project.build_dir / options.build_type.lower()
     path = project.root / locks.FILENAME
-    current = Lock.load(path)
-    base = current
-    update: list[str] = []
     if check:
         if upgrade or upgrade_packages:
             raise CxyError("--check cannot be combined with upgrading")
-        _require_current(project, current)
-    elif upgrade:
+        _require_current(project, Lock.load(path))
+    changed = False
+    for index, profile in enumerate(dict.fromkeys(profiles or [options.profile])):
+        # After the first, the lock has the upgrades, and keeps what the others need.
+        first = index == 0
+        changed |= _lock_with(
+            project,
+            replace(options, profile=profile),
+            check=check,
+            upgrade=upgrade and first,
+            upgrade_packages=upgrade_packages if first else (),
+        )
+    if check:
+        tools.status("Checked", f"{locks.FILENAME} is up to date")
+    elif not changed:
+        tools.status("Unchanged", locks.FILENAME)
+
+
+def _lock_with(
+    project: Project,
+    options: BuildOptions,
+    *,
+    check: bool,
+    upgrade: bool,
+    upgrade_packages: Sequence[str],
+) -> bool:
+    """Lock for one profile, returning whether cxy.lock changed."""
+    ensure_profile(project, options)
+    project = _for_host(project, options)
+    conanfile = _write_conanfile(project)
+    directory = project.build_dir / options.build_type.lower()
+    current = Lock.load(project.root / locks.FILENAME)
+    base = current
+    update: list[str] = []
+    if upgrade:
         base = None
         update = ["--update"]
     else:
@@ -289,19 +354,17 @@ def lock(
     # checking relies on this alone.
     if check or _has_options(project):
         _inspect_graph(project, options, conanfile, arguments, locked=check)
-    if not check:
-        tools.run(
-            "conan",
-            *("lock", "create", str(conanfile)),
-            *_conan_arguments(project, options),
-            *arguments,
-            cwd=project.root,
-            capture=True,
-        )
     if check:
-        tools.status("Checked", f"{locks.FILENAME} is up to date")
-    elif not _save_lock(project, current, output):
-        tools.status("Unchanged", locks.FILENAME)
+        return False
+    tools.run(
+        "conan",
+        *("lock", "create", str(conanfile)),
+        *_conan_arguments(project, options),
+        *arguments,
+        cwd=project.root,
+        capture=True,
+    )
+    return _save_lock(project, current, output)
 
 
 def _lock_arguments(
@@ -327,15 +390,28 @@ def _lock_arguments(
     return arguments, output
 
 
-def _save_lock(project: Project, before: Lock | None, output: Path) -> bool:
-    """Update cxy.lock from a lockfile written by Conan."""
+def _save_lock(
+    project: Project,
+    before: Lock | None,
+    output: Path,
+    graph: Mapping[str, CMakeInfo] | None = None,
+) -> bool:
+    """Update cxy.lock from a lockfile written by Conan, and with the CMake names of
+    conditional dependencies in an installed ``graph``."""
     try:
         conan_lock = json.loads(output.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CxyError(f"cannot read the lockfile that Conan wrote: {error}") from error
-    after = Lock(locks.inputs(project.manifest), conan_lock)
+    conditional = locks.conditional_names(project.manifest)
+    names = {k: v for k, v in (before.cmake if before else {}).items() if k in conditional}
+    for name, info in (graph or {}).items():
+        if name in conditional:
+            names[name] = {"package": info.package, "target": info.target}
+    after = Lock(locks.inputs(project.manifest), conan_lock, names)
     if not after.save(project.root / locks.FILENAME):
         return False
+    if before is not None and before.conan == after.conan and before.inputs == after.inputs:
+        return True
     tools.status("Locked", f"{tools.count(len(after.packages()), 'package')}")
     if before is not None:
         for change in locks.changes(before, after):
@@ -474,10 +550,9 @@ def configure(
     """Bring the CMake build directory up to date, and return it."""
     sources = project.sources()
     directory = _prepare(project, options, sources)
-    graph = _install(project, options, directory)
-    manifest = project.manifest
-    if manifest.when:
-        manifest = manifest.resolve(host_settings(project, options, directory))
+    built = _for_host(project, options)
+    graph = _install(built, options, directory)
+    manifest = built.manifest
     root = Path(os.path.relpath(project.root, _generated(project, options))).as_posix()
     text = cmake.cmakelists(
         _with_defines(manifest, options),
@@ -595,7 +670,7 @@ def _install(project: Project, options: BuildOptions, directory: Path) -> dict[s
     graph = conan.read_graph(stdout)
     write_if_changed(graph_file, stdout)
     if not options.locked:
-        _save_lock(project, lock, new_lock)
+        _save_lock(project, lock, new_lock, graph)
     # Saving the lock changes the inputs.
     stamp().save()
     return graph

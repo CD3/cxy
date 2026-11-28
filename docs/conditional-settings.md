@@ -1,7 +1,7 @@
 # Design: conditional settings
 
-Status: phase 1 is implemented, with the table named `when`. Phases 2 to 4 are proposed, for
-review. Phase 1 differs from the proposal in these ways:
+Status: phases 1 and 2 are implemented, with the decisions at the end. Phases 3 and 4 are
+proposed. Phase 1 differs from the proposal in these ways:
 
 - Conditions can test only `os`, `compiler` and `build_type`, the settings that the exported
   CMake can test too. `arch` and the others need more thought, and the `msvc-like` condition and
@@ -10,6 +10,22 @@ review. Phase 1 differs from the proposal in these ways:
   `-Xclang A -Xclang B`. Repeated definitions are dropped.
 - Managed builds write a `CMakeLists.txt` for each build type, since a condition on the build
   type makes them differ. With one file, Debug and Release builds reconfigured each other.
+
+Phase 2 differs in these ways:
+
+- `link-flags` is only for `[build]` and programs. A library's own link options matter only
+  for a shared library, and passing them on would give the tests a program's options, such as
+  `/SUBSYSTEM:WINDOWS`. System libraries reach whatever links the library, and a program's
+  reach the tests that link its objects.
+- In the exported CMake, a conditional dependency is found inside an `if()` block, and linked
+  with a generator expression, such as `$<$<PLATFORM_ID:Windows>:WIL::WIL>`, so that every
+  place that links dependencies works unchanged.
+- `cxy.lock` records the CMake names of conditional dependencies only, so that the lock of a
+  project without conditions doesn't change. Builds record them, since `conan lock create` and
+  `conan graph info` don't give them.
+- A conditional test framework is an error, since every platform runs the tests.
+- `conan lock create` with a Windows MSVC profile works on Linux, and Conan ignores
+  `default_options` for packages that aren't in the graph: both were checked.
 
 ## Problem
 
@@ -245,15 +261,24 @@ together.
 The MSVC branches are unit-tested on Linux by their text; the Windows CI job builds an exported
 and a managed project with `[when.msvc]` for real.
 
-## Questions for review
+## Decisions
 
-1. **`when` or `target`?** Cargo users will expect `target.'cfg(…)'`. Phase 1 uses `when`.
-2. **An `msvc-like` condition** for MSVC and clang-cl, mapped to
-   `CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"`? Conan has no setting for the front
-   end.
-3. **Version comparisons,** such as `compiler.version < 12`, for workarounds?
-4. **May a `[when]` dependency entry without a version add options** to an unconditional
-   dependency?
-5. **CMake names of conditional dependencies:** recorded in `cxy.lock`, or required in the
-   manifest?
-6. **`--update` on another configuration than the last import's:** a warning or an error?
+The questions raised in review were answered as follows.
+
+1. **`when` or `target`?** `when`. In CMake and in cxy, a target is a library or program, so
+   `[target.core]` would read as a component. There is no `cfg()` wrapper.
+2. **An `msvc-like` condition** for MSVC and clang-cl? Not for now. `msvc` is Conan's
+   `compiler=msvc`, which clang-cl isn't, since Conan calls it `clang`. It can be added later, as
+   a shorthand mapped to `CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC"`.
+3. **Version comparisons,** such as `compiler.version < 12`? Not for now. Conditions test only
+   equality; an operator can be added later without changing the syntax.
+4. **May a `[when]` dependency without a version add options** to an unconditional one? No. A
+   dependency in a `[when]` table is wholly conditional, with its own version, and is an error
+   if it is also unconditional. This can be relaxed later, with options set in the conanfile's
+   `configure()`.
+5. **CMake names of conditional dependencies?** Both: `cxy.lock` records the names that each
+   lock or build sees, and export uses them for a dependency that isn't in its graph. Without a
+   recorded name, export stops with an error asking for `cmake = { package, targets }` in the
+   manifest, rather than guessing `name::name`.
+6. **`--update` on another configuration than the last import's?** An error, since a wrong
+   update edits `cxy.toml`, unless an option says to go on.

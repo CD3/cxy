@@ -4,6 +4,7 @@ import json
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,11 @@ _TOOL_VERSION = re.compile(r"[0-9][0-9A-Za-z.]*")
 _CONAN_NAME = re.compile(r"[a-z0-9_][a-z0-9_+.-]+")
 _DEFINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL)
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+_SYSTEM_LIBRARY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*")
+LIBRARY_KEYS = frozenset({"defines", "flags", "system-libs"})
+"""The settings of a library, as of anything else that compiles."""
+PROGRAM_KEYS = LIBRARY_KEYS | {"link-flags"}
+"""The settings of a program, or of everything, which is also linked."""
 
 OptionValue = str | bool | int
 SOURCE_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++"}
@@ -61,6 +67,13 @@ class Settings:
     """Preprocessor definitions, as NAME or NAME=value."""
     flags: tuple[str, ...] = ()
     """Compiler options, passed as they are."""
+    link_flags: tuple[str, ...] = ()
+    """Linker options, passed as they are. Only programs, and everything, have them."""
+    system_libs: tuple[str, ...] = ()
+    """Libraries of the system to link, such as ws2_32 or dl."""
+
+    def __bool__(self) -> bool:
+        return any(getattr(self, f.name) for f in fields(self) if f.name != "shared")
 
 
 @dataclass(frozen=True)
@@ -84,6 +97,8 @@ class Conditional:
     """For [lib.NAME] libraries, by name."""
     programs: Mapping[str, Settings] = field(default_factory=dict)
     """For [bin.NAME] programs, by name."""
+    dependencies: tuple[Dependency, ...] = ()
+    dev_dependencies: tuple[Dependency, ...] = ()
 
     @property
     def where(self) -> str:
@@ -173,11 +188,13 @@ class Manifest:
     """Those in [bin.NAME] tables, which replace the one that [layout] describes."""
     when: tuple[Conditional, ...] = ()
     """Settings that depend on the platform, compiler or build type."""
+    declared: "Manifest | None" = field(default=None, compare=False, repr=False)
+    """For a manifest whose conditions are resolved, the manifest as written."""
 
     def resolve(self, settings: Mapping[str, str]) -> "Manifest":
         """Return the manifest for a configuration, given its Conan host settings, with the
         settings of each [when] table that applies added to the others."""
-        manifest = replace(self, when=())
+        manifest = replace(self, when=(), declared=self.declared or self)
         for conditional in self.when:
             if not conditions.evaluate(conditional.condition, settings):
                 continue
@@ -194,6 +211,8 @@ class Manifest:
                     replace(c, settings=_added(c.settings, conditional.programs.get(c.name)))
                     for c in manifest.programs
                 ),
+                dependencies=(*manifest.dependencies, *conditional.dependencies),
+                dev_dependencies=(*manifest.dev_dependencies, *conditional.dev_dependencies),
             )
         return manifest
 
@@ -213,7 +232,7 @@ class Manifest:
                 settings = conditional.library
             else:
                 settings = conditional.program
-            if settings.defines or settings.flags:
+            if settings:
                 result.append((conditional, settings))
         return result
 
@@ -227,7 +246,11 @@ class Manifest:
                 Kind.LIBRARY,
                 layout.lib,
                 include=layout.include,
-                settings=Settings(self.library.defines, self.library.flags),
+                settings=Settings(
+                    self.library.defines,
+                    self.library.flags,
+                    system_libs=self.library.system_libs,
+                ),
                 shared=self.library.shared,
             ),
         )
@@ -319,7 +342,7 @@ def parse(text: str) -> Manifest:
         test_working_directory=_test_working_directory(_table(data, "test")),
         test_separate=_boolean(_table(data, "test").get("separate", False), "test.separate"),
         tools=_tools(_table(data, "tools")),
-        build=_settings(_table(data, "build"), "build", known=True),
+        build=_settings(_table(data, "build"), "build", PROGRAM_KEYS, known=True),
         library=library,
         program=program,
         libraries=libraries,
@@ -327,6 +350,7 @@ def parse(text: str) -> Manifest:
         when=_conditionals(_table(data, "when"), libraries, programs),
     )
     _check_components(manifest.components)
+    _check_conditional_dependencies(manifest)
     return manifest
 
 
@@ -354,10 +378,11 @@ def check_dependency_name(name: str) -> None:
     _conan_name(name)
 
 
-def _dependencies(data: Mapping[str, Any], section: str) -> tuple[Dependency, ...]:
+def _dependencies(data: Mapping[str, Any], section: str, where: str = "") -> tuple[Dependency, ...]:
+    prefix = f"{where}.{section}" if where else section
     return tuple(
-        _dependency(_conan_name(name), value, f"{section}.{name}")
-        for name, value in _table(data, section).items()
+        _dependency(_conan_name(name), value, f"{prefix}.{name}")
+        for name, value in _table(data, section, where).items()
     )
 
 
@@ -385,9 +410,15 @@ def _dependency(name: str, value: Any, where: str) -> Dependency:
     )
 
 
-def _settings(table: Mapping[str, Any], where: str, known: bool = False) -> Settings:
+def _settings(
+    table: Mapping[str, Any], where: str, keys: frozenset[str], known: bool = False
+) -> Settings:
+    if "link-flags" in table and "link-flags" not in keys:
+        raise CxyError(
+            f"{where}.link-flags: only programs have their own link options; use build.link-flags"
+        )
     if known:
-        _known(table, {"defines", "flags"}, f"[{where}]")
+        _known(table, keys, f"[{where}]")
     defines = _strings(table.get("defines", []), f"{where}.defines")
     for define in defines:
         if not is_definition(define):
@@ -396,7 +427,28 @@ def _settings(table: Mapping[str, Any], where: str, known: bool = False) -> Sett
     for flag in flags:
         if flag.startswith(("-D", "/D")):
             raise CxyError(f"{where}.flags: put {flag!r} in {where}.defines, without -D")
-    return Settings(defines, flags)
+    link_flags = _strings(table.get("link-flags", []), f"{where}.link-flags")
+    for flag in link_flags:
+        if name := _library_name(flag):
+            raise CxyError(f"{where}.link-flags: put {flag!r} in {where}.system-libs, as {name!r}")
+    system_libs = _strings(table.get("system-libs", []), f"{where}.system-libs")
+    for library in system_libs:
+        if (name := _library_name(library)) and name != library:
+            raise CxyError(f"{where}.system-libs: write {library!r} as {name!r}")
+        if not _SYSTEM_LIBRARY.fullmatch(library):
+            raise CxyError(
+                f"{where}.system-libs: {library!r} is not the name of a library, such as ws2_32"
+            )
+    return Settings(defines, flags, link_flags, tuple(dict.fromkeys(system_libs)))
+
+
+def _library_name(text: str) -> str | None:
+    """The name of a library that a linker option names, as in -lws2_32 or ws2_32.lib."""
+    if text.startswith("-l") and len(text) > 2:
+        return text[2:]
+    if text.lower().endswith(".lib") and len(text) > 4 and not re.search(r"[/\\:]", text):
+        return text[:-4]
+    return None
 
 
 def _added(settings: Any, extra: Settings | None) -> Any:
@@ -408,6 +460,8 @@ def _added(settings: Any, extra: Settings | None) -> Any:
         settings,
         defines=tuple(dict.fromkeys((*settings.defines, *extra.defines))),
         flags=(*settings.flags, *extra.flags),
+        link_flags=(*settings.link_flags, *extra.link_flags),
+        system_libs=tuple(dict.fromkeys((*settings.system_libs, *extra.system_libs))),
     )
 
 
@@ -423,7 +477,7 @@ def _conditionals(
             raise CxyError(f"[{where}]: {error}") from error
         if not isinstance(value, dict):
             raise CxyError(f"{where} must be a table")
-        _known(value, {"build", "lib", "bin"}, f"[{where}]")
+        _known(value, {"build", "lib", "bin", "dependencies", "dev-dependencies"}, f"[{where}]")
         library, named_libraries = _conditional_components(
             _table(value, "lib", where), f"{where}.lib", libraries, "lib"
         )
@@ -434,29 +488,76 @@ def _conditionals(
             Conditional(
                 text,
                 condition,
-                build=_settings(_table(value, "build", where), f"{where}.build", known=True),
+                build=_settings(
+                    _table(value, "build", where), f"{where}.build", PROGRAM_KEYS, known=True
+                ),
                 library=library,
                 program=program,
                 libraries=named_libraries,
                 programs=named_programs,
+                dependencies=_dependencies(value, "dependencies", where),
+                dev_dependencies=_dependencies(value, "dev-dependencies", where),
             )
         )
     return tuple(result)
+
+
+def _check_conditional_dependencies(manifest: Manifest) -> None:
+    """A dependency is either always needed, or only when one condition holds."""
+    always = {
+        **{d.name: "dependencies" for d in manifest.dependencies},
+        **{d.name: "dev-dependencies" for d in manifest.dev_dependencies},
+        **{name: "overrides" for name in manifest.overrides},
+    }
+    seen: dict[str, Conditional] = {}
+    for conditional in manifest.when:
+        sections = (
+            ("dependencies", conditional.dependencies),
+            ("dev-dependencies", conditional.dev_dependencies),
+        )
+        for section, dependencies in sections:
+            where = f"{conditional.where}.{section}"
+            if dependencies and conditions.needs_generator_expression(conditional.condition):
+                raise CxyError(
+                    f"[{where}]: dependencies cannot depend on the build type, since CMake "
+                    "finds packages before choosing it"
+                )
+            for dependency in dependencies:
+                name = dependency.name
+                if name in always:
+                    raise CxyError(
+                        f"{where}.{name}: {name} is also in [{always[name]}]; a dependency is "
+                        "needed either always or only when a condition holds"
+                    )
+                if section == "dev-dependencies" and name in TEST_FRAMEWORKS:
+                    raise CxyError(
+                        f"{where}.{name}: a test framework must be in [dev-dependencies], "
+                        "since every platform runs the tests"
+                    )
+                other = seen.get(name)
+                if other is not None and conditions.can_both_hold(
+                    other.condition, conditional.condition
+                ):
+                    raise CxyError(
+                        f"{where}.{name}: {name} is also in [{other.where}], and both can apply "
+                        "at once; give it one condition, or conditions that exclude each other"
+                    )
+                seen[name] = conditional
 
 
 def _conditional_components(
     table: Mapping[str, Any], where: str, components: Sequence[Component], section: str
 ) -> tuple[Settings, dict[str, Settings]]:
     """Read the [when.X.lib] or [when.X.bin] table of a [when] table."""
+    keys = LIBRARY_KEYS if section == "lib" else PROGRAM_KEYS
     named = {key: value for key, value in table.items() if isinstance(value, dict)}
     if not named:
-        _known(table, {"defines", "flags"}, f"[{where}]")
         if table and components:
             raise CxyError(
                 f"[{where}] is for the {section} that [layout] describes, but there are "
                 f"[{section}.NAME] tables; use [{where}.NAME]"
             )
-        return _settings(table, where), {}
+        return _settings(table, where, keys, known=True), {}
     if len(named) != len(table):
         raise CxyError(
             f"[{where}] holds either settings or named components such as "
@@ -467,8 +568,7 @@ def _conditional_components(
     for name, value in named.items():
         if name not in names:
             raise CxyError(f"[{where}.{name}]: there is no [{section}.{name}]")
-        _known(value, {"defines", "flags"}, f"[{where}.{name}]")
-        result[name] = _settings(value, f"{where}.{name}")
+        result[name] = _settings(value, f"{where}.{name}", keys, known=True)
     return Settings(), result
 
 
@@ -497,14 +597,15 @@ def _libraries(
 ) -> tuple[LibrarySettings, tuple[Component, ...]]:
     named = _named(table, "lib")
     if named is None:
-        _known(table, {"defines", "flags", "shared"}, "[lib]")
-        settings = _settings(table, "lib")
+        settings = _settings(table, "lib", LIBRARY_KEYS)
+        _known(table, LIBRARY_KEYS | {"shared"}, "[lib]")
         shared = _boolean(table.get("shared", False), "lib.shared")
-        return LibrarySettings(settings.defines, settings.flags, shared), ()
+        return LibrarySettings(**vars(settings), shared=shared), ()
     libraries = []
     for name, value in named.items():
         where = f"lib.{name}"
-        _known(value, {"sources", "include", "uses", "shared", "defines", "flags"}, f"[{where}]")
+        settings = _settings(value, where, LIBRARY_KEYS)
+        _known(value, LIBRARY_KEYS | {"sources", "include", "uses", "shared"}, f"[{where}]")
         if "sources" not in value:
             raise CxyError(f"{where}.sources is required: the directory with the library's files")
         directory = _directory(value["sources"], f"{where}.sources", layout)
@@ -518,7 +619,7 @@ def _libraries(
                 directory,
                 include=include,
                 uses=_strings(value.get("uses", []), f"{where}.uses"),
-                settings=_settings(value, where),
+                settings=settings,
                 shared=_boolean(value.get("shared", False), f"{where}.shared"),
             )
         )
@@ -530,12 +631,12 @@ def _programs(
 ) -> tuple[Settings, tuple[Component, ...]]:
     named = _named(table, "bin")
     if named is None:
-        return _settings(table, "bin", known=True), ()
+        return _settings(table, "bin", PROGRAM_KEYS, known=True), ()
     names = tuple(lib if isinstance(lib, str) else lib.name for lib in libraries)
     programs = []
     for name, value in named.items():
         where = f"bin.{name}"
-        _known(value, {"sources", "main", "uses", "defines", "flags"}, f"[{where}]")
+        _known(value, PROGRAM_KEYS | {"sources", "main", "uses"}, f"[{where}]")
         directory = None
         if "sources" in value:
             directory = _directory(value["sources"], f"{where}.sources", layout)
@@ -557,7 +658,7 @@ def _programs(
                 directory,
                 main=main,
                 uses=uses,
-                settings=_settings(value, where),
+                settings=_settings(value, where, PROGRAM_KEYS),
             )
         )
     return Settings(), tuple(programs)
@@ -675,7 +776,7 @@ def _conan_name(name: str) -> str:
     return name
 
 
-def _known(table: Mapping[str, Any], allowed: set[str], where: str) -> None:
+def _known(table: Mapping[str, Any], allowed: AbstractSet[str], where: str) -> None:
     if unknown := sorted(table.keys() - allowed):
         raise CxyError(f"unknown key {unknown[0]!r} in {where}")
 

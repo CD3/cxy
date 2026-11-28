@@ -340,3 +340,125 @@ def test_conditional_flags_need_library_sources():
     manifest = parse('[package]\nname = "app"\nversion = "1.0"\n[when.msvc.lib]\nflags = ["/W4"]\n')
     with pytest.raises(CxyError, match=r"when\.msvc\.lib\.flags apply to library sources"):
         cmake.cmakelists(manifest, Sources.default(manifest, has_headers=True), {})
+
+
+def test_link_settings():
+    manifest = parse("""
+[package]
+name = "app"
+version = "1.0"
+[dev-dependencies]
+catch2 = "3.7.1"
+[build]
+link-flags = ["-Wl,--as-needed"]
+system-libs = ["m"]
+[lib]
+system-libs = ["dl"]
+[bin]
+link-flags = ["-static"]
+system-libs = ["rt"]
+[when.windows.lib]
+system-libs = ["ws2_32"]
+[when.msvc.bin]
+link-flags = ["/SUBSYSTEM:CONSOLE"]
+""")
+    sources = Sources.default(
+        manifest,
+        lib=("lib/a.cpp",),
+        app=("src/b.cpp",),
+        main="src/main.cpp",
+        unit_tests=("lib/a_test.cpp",),
+    )
+    text = cmake.cmakelists(manifest, sources, {})
+    assert 'add_link_options(\n  "-Wl,--as-needed"\n)\nlink_libraries(\n  "m"\n)\n' in text
+    assert 'target_link_libraries(app_lib PUBLIC\n  "dl"\n)\n' in text
+    assert 'if(WIN32)\n  target_link_libraries(app_lib PUBLIC\n    "ws2_32"\n  )\nendif()' in text
+    # The objects that tests link need the libraries, but not the program's link options.
+    assert 'target_link_libraries(app_app PUBLIC\n  "rt"\n)\n' in text
+    assert 'target_link_options(app PRIVATE\n  "-static"\n)\n' in text
+    assert (
+        'if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")\n'
+        '  target_link_options(app PRIVATE\n    "/SUBSYSTEM:CONSOLE"\n  )\nendif()'
+    ) in text
+    assert "target_link_options(app_app" not in text
+
+    programs = plan_programs(manifest, sources, lambda _: set())
+    isolated = {"lib/a_test.cpp": ["lib/a.cpp"]}
+    managed = cmake.cmakelists(
+        manifest.resolve({"os": "Linux"}),
+        sources,
+        {},
+        programs=programs,
+        root="..",
+        isolated=isolated,
+    )
+    program = managed[managed.index("add_executable(app_lib_a_test_isolated") :]
+    assert (
+        'target_link_libraries(app_lib_a_test_isolated PRIVATE\n    "dl"\n    "rt"\n  )' in program
+    )
+
+
+CONDITIONAL_DEPENDENCIES = parse("""
+[package]
+name = "app"
+version = "1.0"
+[dependencies]
+fmt = "11.0.2"
+[dev-dependencies]
+catch2 = "3.7.1"
+[when.windows.dependencies]
+wil = { version = "1.0.240803.1", options = { header_only = true } }
+[when.unix.dependencies]
+cli11 = { version = "2.5.0", force = true }
+[when.linux.dev-dependencies]
+rapidcheck = "1.0"
+""")
+
+
+def test_conditional_dependencies_in_the_conanfile():
+    text = conan.conanfile(CONDITIONAL_DEPENDENCIES, standalone=True)
+    assert "        'wil/*:header_only': True,\n" in text
+    assert (
+        "    def requirements(self):\n"
+        "        self.requires('fmt/11.0.2')\n"
+        "        if self.settings.os == 'Windows':\n"
+        "            self.requires('wil/1.0.240803.1')\n"
+        "        if not self.settings.os == 'Windows':\n"
+        "            self.requires('cli11/2.5.0', force=True)\n"
+    ) in text
+    assert (
+        "    def build_requirements(self):\n"
+        "        self.test_requires('catch2/3.7.1')\n"
+        "        if self.settings.os == 'Linux':\n"
+        "            self.test_requires('rapidcheck/1.0')\n"
+    ) in text
+    ast.parse(text)
+    managed = conan.conanfile(CONDITIONAL_DEPENDENCIES.resolve({"os": "Linux"}))
+    assert "if " not in managed and "wil" not in managed
+    assert "self.requires('cli11/2.5.0', force=True)" in managed
+
+
+def test_conditional_dependencies_in_cmake():
+    manifest = CONDITIONAL_DEPENDENCIES
+    sources = Sources.default(manifest, lib=("lib/a.cpp",), tests=("tests/a.cpp",))
+    graph = {
+        "cli11": CMakeInfo("CLI11", "CLI11::CLI11"),
+        "wil": CMakeInfo("wil", "WIL::WIL"),
+        "catch2": CMakeInfo("Catch2", "Catch2::Catch2", frozenset({"Catch2::Catch2WithMain"})),
+    }
+    programs = plan_programs(manifest, sources, lambda _: {"catch2"})
+    text = cmake.cmakelists(manifest, sources, graph, programs=programs)
+    assert (
+        "find_package(fmt REQUIRED CONFIG)\n"
+        "if(WIN32)\n  find_package(wil REQUIRED CONFIG)\nendif()\n"
+        "if(NOT WIN32)\n  find_package(CLI11 REQUIRED CONFIG)\nendif()\n"
+    ) in text
+    assert (
+        "target_link_libraries(app_lib PUBLIC fmt::fmt $<$<PLATFORM_ID:Windows>:WIL::WIL> "
+        "$<$<NOT:$<PLATFORM_ID:Windows>>:CLI11::CLI11>)"
+    ) in text
+    assert (
+        '  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+        "    find_package(rapidcheck REQUIRED CONFIG)\n  endif()\n"
+    ) in text
+    assert "$<$<PLATFORM_ID:Linux>:rapidcheck::rapidcheck>" in text
