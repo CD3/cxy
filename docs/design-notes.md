@@ -32,7 +32,7 @@
 - **A check that could not run is a failure.** Otherwise a missing tool or compile database would
   make CI pass. The exception is cmake-lint, which is no longer maintained and so is optional.
 - **cxy never configures a project that it does not manage**, because that runs its code. The
-  exception is `cxy port`, which is asked to: CMake's File API is the only reliable way to learn
+  exception is `cxy import`, which is asked to: CMake's File API is the only reliable way to learn
   what a CMake project builds, since its files are a programming language.
 - **`cxy.lock` wraps Conan's lockfile with the settings it was made from.** Conan's lockfile records
   overrides that win over the recipe's, even in strict mode, so on its own it would silently ignore

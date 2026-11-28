@@ -4,9 +4,9 @@ import sys
 
 import pytest
 
+from cxy.core import importing
 from cxy.core import manifest as manifests
-from cxy.core import porting
-from cxy.core.porting import CMakeProject, Findings, Recipe, Requirement, Target
+from cxy.core.importing import CMakeProject, Findings, Recipe, Requirement, Target
 
 
 def install_output(*dependencies, **root):
@@ -21,11 +21,11 @@ def dependency(require, **traits):
 def read(tmp_path, name, text, output):
     (tmp_path / name).write_text(text)
     findings = Findings()
-    return porting.read_recipe(tmp_path / name, output, findings), findings
+    return importing.read_recipe(tmp_path / name, output, findings), findings
 
 
 def test_scan_recipe():
-    overrides, conditional = porting.scan_recipe(
+    overrides, conditional = importing.scan_recipe(
         "class P:\n"
         "    def requirements(self):\n"
         '        self.requires("fmt/10.2.1")\n'
@@ -33,7 +33,7 @@ def test_scan_recipe():
     )
     assert overrides == {"zlib": "1.3.1"}
     assert not conditional
-    _, conditional = porting.scan_recipe(
+    _, conditional = importing.scan_recipe(
         "class P:\n"
         "    def requirements(self):\n"
         '        if self.settings.os == "Windows":\n'
@@ -99,7 +99,7 @@ RECIPE = Recipe(requirements=(Requirement("gtest", "1.17.0", test=True),))
 
 def propose(root, targets, recipe=RECIPE, **cmake):
     findings = Findings()
-    text = porting.propose(
+    text = importing.propose(
         root, recipe, CMakeProject("Demo", "1.0", tuple(targets), **cmake), findings
     )
     return manifests.parse(text), findings
@@ -172,7 +172,7 @@ def test_what_cxy_cannot_build(tmp_path):
 def test_libraries_in_one_directory(tmp_path):
     write(tmp_path, {"lib/a.cpp": "", "lib/b.cpp": ""})
     findings = Findings()
-    porting.propose(
+    importing.propose(
         tmp_path,
         Recipe(),
         CMakeProject(
@@ -201,7 +201,7 @@ def test_what_conan_does_not_provide(tmp_path):
         "package_folder": str(package),
         "cpp_info": {"root": {"system_libs": ["m"], "defines": ["FMT_SHARED"]}},
     }
-    provided = porting.conan_provides(json.dumps(nodes))
+    provided = importing.conan_provides(json.dumps(nodes))
     for item in (
         "-lm",
         "m.lib",
@@ -218,7 +218,7 @@ def test_what_conan_does_not_provide(tmp_path):
     write(tmp_path, {"lib/a.cpp": "", "src/main.cpp": ""})
     inherited = ("-fopenmp", f"{package}/lib/libfmt.a", "/usr/lib/libgomp.so")
     findings = Findings()
-    porting.propose(
+    importing.propose(
         tmp_path,
         Recipe(),
         CMakeProject(
@@ -317,7 +317,7 @@ def snapshot(root):
 
 
 @pytest.mark.e2e
-def test_port(tmp_path):
+def test_import(tmp_path):
     write(
         tmp_path,
         {
@@ -335,7 +335,7 @@ def test_port(tmp_path):
     before = snapshot(tmp_path)
 
     # The test needs a definition of its own, which cxy cannot set.
-    result = cxy("port", cwd=tmp_path)
+    result = cxy("import", cwd=tmp_path)
     assert result.returncode == 1, result.stderr
     assert '-DEXPECTED="hi!"' in result.stderr
     assert not (tmp_path / "cxy.toml").exists()
@@ -346,7 +346,7 @@ def test_port(tmp_path):
         '#include "greeting.hpp"\nTEST_CASE("greet") { REQUIRE(greet() == "hi!"); }\n'
     )
     before = snapshot(tmp_path)
-    result = cxy("port", cwd=tmp_path)
+    result = cxy("import", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert {k: v for k, v in snapshot(tmp_path).items() if k != "cxy.toml"} == before
     manifest = manifests.load(tmp_path / "cxy.toml")
@@ -363,7 +363,7 @@ def test_port(tmp_path):
     result = cxy("test", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "All tests passed" in result.stdout
-    assert cxy("port", cwd=tmp_path).returncode == 1  # cxy.toml exists.
+    assert cxy("import", cwd=tmp_path).returncode == 1  # cxy.toml exists.
 
 
 def test_settings_are_carried(tmp_path):
@@ -518,7 +518,7 @@ target_link_libraries(all_tests PRIVATE text Catch2::Catch2WithMain)
 
 
 @pytest.mark.e2e
-def test_port_several_libraries_and_programs(tmp_path):
+def test_import_several_libraries_and_programs(tmp_path):
     from test_cli import COMPONENTS
 
     files = {name: text for name, text in COMPONENTS.items() if name != "cxy.toml"}
@@ -526,7 +526,7 @@ def test_port_several_libraries_and_programs(tmp_path):
     files["conanfile.txt"] = "[test_requires]\ncatch2/3.7.1\n"
     write(tmp_path, files)
 
-    result = cxy("port", cwd=tmp_path)
+    result = cxy("import", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = manifests.load(tmp_path / "cxy.toml")
     assert {(c.kind.value, c.name) for c in manifest.components} == {
@@ -677,7 +677,7 @@ def test_interface_libraries_from_the_listing(tmp_path):
         },
         {"name": "core", "type": "STATIC_LIBRARY", "directory": str(tmp_path), "links": ["hdr"]},
     ]
-    core, other, hdr = porting._with_interface_libraries(
+    core, other, hdr = importing._with_interface_libraries(
         [Target("core", "STATIC_LIBRARY", links=("other",)), Target("other", "STATIC_LIBRARY")],
         listing,
         project_path,
@@ -725,9 +725,9 @@ HEADER_ONLY_FILES = {
 
 
 @pytest.mark.e2e
-def test_port_header_only_library(tmp_path):
+def test_import_header_only_library(tmp_path):
     write(tmp_path, HEADER_ONLY_FILES)
-    result = cxy("port", cwd=tmp_path)
+    result = cxy("import", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = manifests.load(tmp_path / "cxy.toml")
     components = {c.where: c for c in manifest.components}

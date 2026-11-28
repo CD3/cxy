@@ -40,18 +40,18 @@ _OPTION_COMMANDS = {"add_compile_options", "set_property", "target_compile_optio
 _LINK_OPTION_COMMANDS = {"add_link_options", "set_property", "target_link_options"}
 _STANDARD_COMMANDS = {"set_property", "set_target_properties", "target_compile_features"}
 _CMAKE_OPTIONS_IGNORED = {"BUILD_TESTING"}
-_TARGETS_FILE = "cxy-port-targets.json"
+_TARGETS_FILE = "cxy-import-targets.json"
 # CMake's File API leaves out interface libraries without sources, and the links to them, so
 # a file included by project() lists the targets once the top-level directory is done.
-_TARGETS_HOOK = r"""# Written by cxy port.
-get_property(_cxy_port_listing GLOBAL PROPERTY CXY_PORT_LISTING)
-if(NOT _cxy_port_listing)
-  set_property(GLOBAL PROPERTY CXY_PORT_LISTING ON)
+_TARGETS_HOOK = r"""# Written by cxy import.
+get_property(_cxy_import_listing GLOBAL PROPERTY CXY_IMPORT_LISTING)
+if(NOT _cxy_import_listing)
+  set_property(GLOBAL PROPERTY CXY_IMPORT_LISTING ON)
   # Functions keep the policies they are defined with, not the project's.
   cmake_policy(PUSH)
   cmake_policy(VERSION 3.24)
 
-  function(_cxy_port_quote out value)
+  function(_cxy_import_quote out value)
     string(REPLACE "\\" "\\\\" value "${value}")
     string(REPLACE "\"" "\\\"" value "${value}")
     string(REPLACE "\n" "\\n" value "${value}")
@@ -60,18 +60,18 @@ if(NOT _cxy_port_listing)
     set(${out} "\"${value}\"" PARENT_SCOPE)
   endfunction()
 
-  function(_cxy_port_array out)
+  function(_cxy_import_array out)
     set(text "")
     set(separator "")
     foreach(item IN LISTS ARGN)
-      _cxy_port_quote(item "${item}")
+      _cxy_import_quote(item "${item}")
       string(APPEND text "${separator}${item}")
       set(separator ", ")
     endforeach()
     set(${out} "[${text}]" PARENT_SCOPE)
   endfunction()
 
-  function(_cxy_port_property out target property)
+  function(_cxy_import_property out target property)
     get_target_property(value "${target}" ${property})
     if(value STREQUAL "value-NOTFOUND")
       set(value "")
@@ -80,11 +80,11 @@ if(NOT _cxy_port_listing)
   endfunction()
 
   # The targets that a target links, by their real names.
-  function(_cxy_port_links out target type)
+  function(_cxy_import_links out target type)
     if(type STREQUAL "INTERFACE_LIBRARY")
-      _cxy_port_property(items "${target}" INTERFACE_LINK_LIBRARIES)
+      _cxy_import_property(items "${target}" INTERFACE_LINK_LIBRARIES)
     else()
-      _cxy_port_property(items "${target}" LINK_LIBRARIES)
+      _cxy_import_property(items "${target}" LINK_LIBRARIES)
     endif()
     set(links "")
     foreach(item IN LISTS items)
@@ -102,7 +102,7 @@ if(NOT _cxy_port_listing)
     set(${out} "${links}" PARENT_SCOPE)
   endfunction()
 
-  function(_cxy_port_list_targets)
+  function(_cxy_import_list_targets)
     set(entries "")
     set(separator "")
     set(directories "${CMAKE_SOURCE_DIR}")
@@ -113,11 +113,11 @@ if(NOT _cxy_port_listing)
       get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
       foreach(target IN LISTS targets)
         get_target_property(type "${target}" TYPE)
-        _cxy_port_links(links "${target}" "${type}")
-        _cxy_port_array(links ${links})
-        _cxy_port_quote(name "${target}")
-        _cxy_port_quote(kind "${type}")
-        _cxy_port_quote(where "${directory}")
+        _cxy_import_links(links "${target}" "${type}")
+        _cxy_import_array(links ${links})
+        _cxy_import_quote(name "${target}")
+        _cxy_import_quote(kind "${type}")
+        _cxy_import_quote(where "${directory}")
         set(entry "{\"name\": ${name}, \"type\": ${kind}, \"directory\": ${where}")
         string(APPEND entry ", \"links\": ${links}")
         if(type STREQUAL "INTERFACE_LIBRARY")
@@ -131,8 +131,8 @@ if(NOT _cxy_port_listing)
             else()
               set(property INTERFACE_LINK_OPTIONS)
             endif()
-            _cxy_port_property(values "${target}" ${property})
-            _cxy_port_array(values ${values})
+            _cxy_import_property(values "${target}" ${property})
+            _cxy_import_array(values ${values})
             string(APPEND entry ", \"${field}\": ${values}")
           endforeach()
         endif()
@@ -140,11 +140,11 @@ if(NOT _cxy_port_listing)
         set(separator ",\n")
       endforeach()
     endwhile()
-    file(WRITE "${CMAKE_BINARY_DIR}/cxy-port-targets.json" "[${entries}]\n")
+    file(WRITE "${CMAKE_BINARY_DIR}/cxy-import-targets.json" "[${entries}]\n")
   endfunction()
 
   cmake_policy(POP)
-  cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _cxy_port_list_targets)
+  cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _cxy_import_list_targets)
 endif()
 """
 
@@ -271,12 +271,14 @@ class CMakeProject:
     options: Mapping[str, str] = field(default_factory=dict)
 
 
-def port(root: Path, options: BuildOptions, *, dry_run: bool = False, force: bool = False) -> None:
+def import_project(
+    root: Path, options: BuildOptions, *, dry_run: bool = False, force: bool = False
+) -> None:
     target = root / manifests.FILENAME
     if target.exists() and not dry_run:
         raise CxyError(f"{target} already exists")
     if not (root / "CMakeLists.txt").is_file():
-        raise CxyError(f"no CMakeLists.txt in {root}: only CMake projects can be ported for now")
+        raise CxyError(f"no CMakeLists.txt in {root}: only CMake projects can be imported for now")
     recipe_path = next(
         (root / name for name in ("conanfile.py", "conanfile.txt") if (root / name).is_file()),
         None,
@@ -284,9 +286,9 @@ def port(root: Path, options: BuildOptions, *, dry_run: bool = False, force: boo
     if recipe_path is None:
         raise CxyError(f"no conanfile.py or conanfile.txt in {root}")
 
-    placeholder = Project(root, Manifest(name="port", version="0"))
+    placeholder = Project(root, Manifest(name="import", version="0"))
     pipeline.create_build_dir(placeholder)
-    directory = placeholder.build_dir / "port"
+    directory = placeholder.build_dir / "import"
     findings = Findings()
     graph = _install(root, recipe_path, directory / "conan", options)
     recipe = read_recipe(recipe_path, graph, findings)
@@ -324,7 +326,7 @@ def port(root: Path, options: BuildOptions, *, dry_run: bool = False, force: boo
 
 
 def _install(root: Path, recipe: Path, output: Path, options: BuildOptions) -> str:
-    placeholder = Project(root, Manifest(name="port", version="0"))
+    placeholder = Project(root, Manifest(name="import", version="0"))
     pipeline.ensure_profile(placeholder, options)
     tools.status("Resolving", f"the dependencies in {recipe.name}")
     # Files from an earlier install with other settings would also be found by CMake.
@@ -358,7 +360,7 @@ def _configure(root: Path, build: Path, toolchain: Path, options: BuildOptions) 
         {"kind": "cmakeFiles", "version": 1},
     ]
     query.write_text(json.dumps({"requests": requests}), encoding="utf-8")
-    hook = build / "cxy-port-targets.cmake"
+    hook = build / "cxy-import-targets.cmake"
     hook.write_text(_TARGETS_HOOK, encoding="utf-8")
     (build / _TARGETS_FILE).unlink(missing_ok=True)
     tools.status("Configuring", "the CMake project")

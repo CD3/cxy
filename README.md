@@ -19,7 +19,7 @@ cxy test -- "[some-tag]"   # arguments after -- go to the program
 cxy build -D TRACE=1       # a definition for this build only, as if added to [build]
 ```
 
-Commands: `new`, `init`, `port`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
+Commands: `new`, `init`, `import`, `build`, `run`, `test`, `add`, `remove`, `fmt`, `lint`, `lock`, `export`, `clean`.
 
 
 ## Why?
@@ -313,11 +313,11 @@ extensions. Be careful when checking a project that you do not trust.
 
 ## Using cxy in an existing project
 
-In a CMake project that uses Conan, `cxy port` writes a `cxy.toml` that builds the same thing, so
+In a CMake project that uses Conan, `cxy import` writes a `cxy.toml` that builds the same thing, so
 that you can use cxy while everyone else keeps their own setup. It writes nothing else in the
-project: it runs Conan and CMake on the project in `build/cxy/port`, and reads what CMake reports
+project: it runs Conan and CMake on the project in `build/cxy/import`, and reads what CMake reports
 about each target with its File API. The File API leaves out interface libraries, so a file that
-`port` has CMake include after `project()` lists them. `cxy port --dry-run` prints the manifest
+`import` has CMake include after `project()` lists them. `cxy import --dry-run` prints the manifest
 instead.
 
 It finds the dependencies, their options and overrides, the C++ standard, which directories hold
@@ -341,7 +341,7 @@ differently is a problem, and then `cxy.toml` is written only with `--force`:
   dependencies.
 
 Warnings are for what to check, such as a C++ standard that only comes from your Conan profile. A
-recipe or `CMakeLists.txt` can run any code, so only port projects that you trust.
+recipe or `CMakeLists.txt` can run any code, so only import projects that you trust.
 
 ## Sharing a project with people who do not use cxy
 

@@ -17,9 +17,9 @@ app.command(
     "cxy.commands.create:init", name="init", help="Create a project in the current directory."
 )
 app.command(
-    "cxy.commands.port:port",
-    name="port",
-    help="Write a cxy.toml for an existing CMake and Conan project.",
+    "cxy.commands.importing:import_",
+    name="import",
+    help="Write a cxy.toml from an existing CMake and Conan project.",
 )
 app.command(
     "cxy.commands.build:build", name="build", help="Build the project, including its tests."

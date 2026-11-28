@@ -3,18 +3,18 @@ from typing import Annotated
 
 from cyclopts import Parameter
 
-from cxy.core import porting
+from cxy.core import importing
 from cxy.core.pipeline import BuildOptions
 
 
-def port(
+def import_(
     *,
     dry_run: Annotated[bool, Parameter(negative="")] = False,
     force: Annotated[bool, Parameter(negative="")] = False,
     profile: str = "default",
     verbose: Annotated[bool, Parameter(name=["--verbose", "-v"], negative="")] = False,
 ) -> None:
-    """Write a cxy.toml for the CMake and Conan project in the current directory.
+    """Write a cxy.toml from the CMake and Conan project in the current directory.
 
     Nothing else in the project changes. Conan and CMake run in cxy's build directory to
     find out what the project builds, and anything cxy would build differently is reported.
@@ -30,7 +30,7 @@ def port(
     verbose
         Show full tool output.
     """
-    porting.port(
+    importing.import_project(
         Path.cwd(),
         BuildOptions(profile=profile, verbose=verbose),
         dry_run=dry_run,
