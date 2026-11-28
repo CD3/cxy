@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from cyclopts import Parameter
 
 from cxy.core import importing, merging
+from cxy.core.errors import CxyError
 from cxy.core.pipeline import BuildOptions
 
 
@@ -46,7 +47,8 @@ def import_(
         force=force,
         update=update,
         resolve=resolve,
-        choose=_ask if sys.stdin.isatty() else None,
+        # On Windows the null device counts as a terminal, so check both ends.
+        choose=_ask if sys.stdin.isatty() and sys.stdout.isatty() else None,
     )
 
 
@@ -55,7 +57,13 @@ def _ask(conflict: merging.Conflict) -> bool:
         "\n".join(["Conflict in " + merging.explain(conflict)[0], *merging.explain(conflict)[1:]])
     )
     while True:
-        answer = input("Use yours or upstream's? [y/u] ").strip().lower()
+        try:
+            answer = input("Use yours or upstream's? [y/u] ").strip().lower()
+        except EOFError:
+            raise CxyError(
+                "no answer, so cxy.toml was not updated; use --resolve yours or "
+                "--resolve upstream to decide without asking"
+            ) from None
         if answer in ("y", "yours"):
             return False
         if answer in ("u", "upstream"):

@@ -114,3 +114,17 @@ def test_asking_about_a_conflict(monkeypatch, capsys):
     assert capsys.readouterr().out.startswith("Conflict in package.version\n  last import:")
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     assert importing._ask(conflict) is False
+
+
+def test_no_answer_about_a_conflict(monkeypatch):
+    import pytest
+
+    from cxy.commands import importing
+    from cxy.core.errors import CxyError
+
+    def closed(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", closed)
+    with pytest.raises(CxyError, match="--resolve"):
+        importing._ask(Conflict(("package", "version"), "1.0", "1.1", "2.0"))
