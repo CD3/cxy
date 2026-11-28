@@ -1,9 +1,21 @@
 # cxy
 
-A cargo-like project tool for C++. Rather than reinventing the wheel, `cxy` uses the
+A cargo-like project tool for C++, similar to [cppship](https://github.com/qqiangwu/cppship).
+Rather than reinventing the wheel, `cxy` uses the
 tools that people are already using to manage dependencies, configure builds, run
 builds, format and check code. It even supports exporting projects to "standard"
 Conan/CMake format so you can share it with people that don't want to use it.
+
+## Features
+
+- Simple interface makes it easy to create new projects, build existing projects, run the unit tests, etc.
+   - Create and setup a new project with `cxy new <PROJECT_NAM>`
+   - Build and run tests with one command, `cxy test`
+- Interop with non-cxy projects. 
+   - `cxy import` reads the CMake and Conan configuration for an existing project and writes `cxy.toml` file that can be used to build with `cxy`.
+   - `cxy export` writes `CMakeLists.txt` and `conanfile.py` that can be used to build the project without `cxy`.
+   - `cxy import --update` re-imports a project and merges changes into an existing `cxy.toml`.
+   - This is essential for my use case (working with non `cxy` users) and a requirement for any tool that want to gain adoption in this space in my opinion.
 
 ## Basic Usage
 
@@ -28,10 +40,24 @@ Because going from an idea for a library or application to a project that
 compiles is a pain and going from a project that compiles to a project that uses
 best practices is hard.
 
-Tools exist to do everything that is needed, they just have to be setup. Conan does a
+I had the idea for a tool like this after I wrote my first Rust project ([run-if](https://github.com/CD3/run-if))
+and got to see how nice cargo is to work with. C++ does not have a "standard" package manager/build system,
+but there are very good, widely-used tools that solve parts of the problem.
+Tools exist to do everything that is needed for a complete cargo-like experience, they just have to be setup. Conan does a
 good job managing dependencies and CMake is the defacto build configuration standard
 whether we like it or not. Ninja is a fast build executor, and `clang-tools` can format and check code. `cxy` 
 just brings these tools together in a simple, easy to use tool.
+
+Before I started to write a tool I looked to see if something already existed
+and found [cppship](https://github.com/qqiangwu/cppship). I started using it
+for some hobby projects an really liked it. I soon ran into limitations that
+made it not possible to use. I also could not use it on my exiting projects without
+significantly reorganizing them, which ment it wasn't possible to use it on
+projects I worked on but did not own (i.e. team projects at work).
+
+A year later, after experimenting with using Claude Code to write tools do make common tasks at work simpler,
+I decided to start `cxy` and see how it went. So far, it is working well.
+
 
 ### Why Python?
 
