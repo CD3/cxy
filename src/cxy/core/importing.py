@@ -10,7 +10,7 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
@@ -18,7 +18,7 @@ from typing import Any
 
 import tomlkit
 
-from cxy.core import closure, pipeline, testing, tools
+from cxy.core import closure, imported, merging, pipeline, testing, tools
 from cxy.core import manifest as manifests
 from cxy.core.errors import CxyError
 from cxy.core.manifest import STANDARDS, Kind, Layout, Manifest, OptionValue
@@ -270,13 +270,35 @@ class CMakeProject:
 
     options: Mapping[str, str] = field(default_factory=dict)
 
+    inputs: tuple[str, ...] = ()
+    """The project's CMake files that configuring read, relative to the project root."""
+
+
+Choose = Callable[[merging.Conflict], bool]
+"""Ask which value of a conflicting setting to use: True for upstream's."""
+
 
 def import_project(
-    root: Path, options: BuildOptions, *, dry_run: bool = False, force: bool = False
+    root: Path,
+    options: BuildOptions,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+    update: bool = False,
+    resolve: str | None = None,
+    choose: Choose | None = None,
 ) -> None:
+    """Write a cxy.toml for the project, or with ``update``, merge the project's changes into it.
+
+    ``resolve`` ("yours" or "upstream") decides every conflict; otherwise ``choose`` is asked.
+    """
     target = root / manifests.FILENAME
-    if target.exists() and not dry_run:
-        raise CxyError(f"{target} already exists")
+    if update and not target.exists():
+        raise CxyError(f"no {manifests.FILENAME} to update in {root}; import without --update")
+    if target.exists() and not dry_run and not update:
+        raise CxyError(
+            f"{target} already exists; use --update to merge the project's changes into it"
+        )
     if not (root / "CMakeLists.txt").is_file():
         raise CxyError(f"no CMakeLists.txt in {root}: only CMake projects can be imported for now")
     recipe_path = next(
@@ -300,11 +322,15 @@ def import_project(
         directory / "cmake", root, toolchain.read_text(encoding="utf-8"), [directory]
     )
     text = propose(root, recipe, cmake, findings, conan_provides(graph))
+    record = imported.Record.of(root, text, [recipe_path.name, *cmake.inputs])
 
     for problem in findings.problems:
         tools.status("Problem", problem)
     for warning in findings.warnings:
         tools.status("Warning", warning)
+    if update:
+        _update(root, text, record, findings, dry_run, force, resolve, choose)
+        return
     if dry_run or (findings.problems and not force):
         print(text, end="", flush=True)
     if dry_run:
@@ -322,7 +348,82 @@ def import_project(
             f"{manifests.FILENAME} was not written; use --force to write it anyway"
         )
     target.write_text(text, encoding="utf-8", newline="")
+    record.save(root)
     tools.status("Created", f"{manifests.FILENAME}; check the warnings above, if any")
+
+
+def _update(
+    root: Path,
+    text: str,
+    record: imported.Record,
+    findings: Findings,
+    dry_run: bool,
+    force: bool,
+    resolve: str | None,
+    choose: Choose | None,
+) -> None:
+    """Merge a new proposal into the existing cxy.toml, using the last one as the base."""
+    target = root / manifests.FILENAME
+    yours = target.read_text(encoding="utf-8")
+    previous = imported.Record.load(root)
+    if previous is None:
+        tools.status(
+            "Note",
+            f"there is no {imported.FILENAME} from an earlier import, so every difference "
+            "from the project is a conflict",
+        )
+    plan = merging.plan(previous.proposed if previous else None, yours, text)
+    if dry_run:
+        for change in plan.changes:
+            tools.status("Would update", merging.describe(change))
+        for conflict in plan.conflicts:
+            first, *rest = merging.explain(conflict)
+            tools.status("Conflict", "\n".join([first, *(" " * 13 + line for line in rest)]))
+        if not plan.changes and not plan.conflicts:
+            tools.status("Up to date", f"{manifests.FILENAME} matches the project")
+        return
+    try:
+        manifests.parse(text)
+    except CxyError as error:
+        raise CxyError(
+            f"cxy cannot describe this project, so {manifests.FILENAME} was not updated: {error}"
+        ) from error
+    if findings.problems and not force:
+        problems = tools.count(len(findings.problems), "problem")
+        raise CxyError(
+            f"cxy would build this project differently ({problems}), so "
+            f"{manifests.FILENAME} was not updated; use --force to update it anyway"
+        )
+
+    changes = list(plan.changes)
+    if plan.conflicts and resolve is None and choose is None:
+        listed = "\n".join(line for c in plan.conflicts for line in merging.explain(c))
+        raise CxyError(
+            f"{tools.count(len(plan.conflicts), 'setting')} changed both in "
+            f"{manifests.FILENAME} and in the project, so it was not updated:\n{listed}\n"
+            "Run in a terminal to choose, or use --resolve yours or --resolve upstream"
+        )
+    for conflict in plan.conflicts:
+        upstream = (
+            resolve == "upstream" if resolve is not None else bool(choose and choose(conflict))
+        )
+        if upstream:
+            changes.append(conflict.taking_upstream())
+
+    merged = merging.apply(yours, text, changes) if changes else yours
+    try:
+        Project(root, manifests.parse(merged)).sources()
+    except CxyError as error:
+        raise CxyError(
+            f"the merged {manifests.FILENAME} would be invalid, so it was not updated: {error}"
+        ) from error
+    if merged != yours:
+        target.write_text(merged, encoding="utf-8", newline="")
+    record.save(root)
+    for change in changes:
+        tools.status("Updated", merging.describe(change))
+    if not changes:
+        tools.status("Up to date", f"{manifests.FILENAME} matches the project")
 
 
 def _install(root: Path, recipe: Path, output: Path, options: BuildOptions) -> str:
@@ -587,12 +688,14 @@ def read_cmake(
         targets = _with_interface_libraries(targets, _json(listing), project_path)
 
     mentions = False
+    read: list[str] = []
     for item in inputs:
         if item.get("isExternal") or item.get("isGenerated") or item.get("isCMake"):
             continue
         relative = project_path(item["path"])
         if relative is None:
             continue
+        read.append(relative)
         text = (root / relative).read_text(encoding="utf-8", errors="replace")
         mentions = mentions or re.search(r"\bCMAKE_CXX_STANDARD\b", text) is not None
 
@@ -605,6 +708,7 @@ def read_cmake(
         mentions_standard=mentions,
         toolchain_standard=int(toolchain_standard[1]) if toolchain_standard else None,
         options=_cmake_options(cache["entries"]),
+        inputs=tuple(read),
     )
 
 

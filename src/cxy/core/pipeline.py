@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cxy.core import closure, cmake, conan, formatting, testing, tools
+from cxy.core import closure, cmake, conan, formatting, imported, testing, tools
 from cxy.core import lock as locks
 from cxy.core import manifest as manifests
 from cxy.core import options as package_options
@@ -425,11 +425,28 @@ def clean(project: Project) -> None:
 
 
 def _prepare(project: Project, options: BuildOptions, sources: Sources) -> Path:
+    _warn_if_project_changed(project)
     # Report project errors before running tools.
     manifest = _with_defines(project.manifest, options)
     cmake.cmakelists(manifest, sources, {}, programs=testing.plan(project, sources))
     create_build_dir(project)
     return project.build_dir / options.build_type.lower()
+
+
+def _warn_if_project_changed(project: Project) -> None:
+    """Say when the CMake or Conan files a cxy.toml was imported from have changed."""
+    record = imported.Record.load(project.root)
+    changed = record.changed(project.root) if record is not None else []
+    if changed:
+        files = (
+            changed[0] if len(changed) == 1 else f"{tools.count(len(changed))} ({changed[0]}, ...)"
+        )
+        verb = "has" if len(changed) == 1 else "have"
+        tools.status(
+            "Warning",
+            f"{files} {verb} changed since {manifests.FILENAME} was imported; "
+            "run cxy import --update",
+        )
 
 
 def _build(

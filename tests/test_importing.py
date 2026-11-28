@@ -267,6 +267,7 @@ def cxy(*arguments, cwd):
         cwd=cwd,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,  # Never a terminal, so conflicts are not asked about.
     )
 
 
@@ -348,7 +349,9 @@ def test_import(tmp_path):
     before = snapshot(tmp_path)
     result = cxy("import", cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert {k: v for k, v in snapshot(tmp_path).items() if k != "cxy.toml"} == before
+    assert {
+        k: v for k, v in snapshot(tmp_path).items() if k not in ("cxy.toml", "cxy-import.json")
+    } == before
     manifest = manifests.load(tmp_path / "cxy.toml")
     assert (manifest.name, manifest.version, manifest.std) == ("mixed", "1.2.3", 20)
     assert manifest.layout.lib == manifest.layout.include == manifest.layout.src == "src"
@@ -740,3 +743,58 @@ def test_import_header_only_library(tmp_path):
     assert run.stdout.splitlines()[-1] == "42"
     test = cxy("test", cwd=tmp_path)
     assert test.returncode == 0, test.stdout + test.stderr
+
+
+@pytest.mark.e2e
+def test_import_update(tmp_path):
+    write(tmp_path, HEADER_ONLY_FILES)
+    assert cxy("import", cwd=tmp_path).returncode == 0
+    assert (tmp_path / "cxy-import.json").is_file()
+    manifest_path = tmp_path / "cxy.toml"
+
+    # You change one setting, and the team another.
+    with manifest_path.open("a") as file:
+        file.write("\n[test]\nseparate = true  # mine\n")
+    cmakelists = tmp_path / "CMakeLists.txt"
+    cmakelists.write_text(
+        HEADER_ONLY_CMAKELISTS + "target_compile_definitions(core PUBLIC CORE_FAST)\n"
+    )
+    built = cxy("build", cwd=tmp_path)
+    assert built.returncode == 0, built.stdout + built.stderr
+    assert "CMakeLists.txt has changed since cxy.toml was imported" in built.stderr
+    refused = cxy("import", cwd=tmp_path)
+    assert refused.returncode == 1 and "--update" in refused.stderr
+
+    before = manifest_path.read_text()
+    dry = cxy("import", "--update", "--dry-run", cwd=tmp_path)
+    assert dry.returncode == 0, dry.stderr
+    assert 'lib.core.defines: (none) -> ["CORE_FAST"]' in dry.stderr
+    assert manifest_path.read_text() == before
+
+    updated = cxy("import", "--update", cwd=tmp_path)
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    assert "Updated lib.core.defines" in updated.stderr
+    text = manifest_path.read_text()
+    assert "separate = true  # mine" in text
+    manifest = manifests.load(manifest_path)
+    core = next(c for c in manifest.components if c.name == "core")
+    assert core.settings.defines == ("CORE_FAST",) and manifest.test_separate
+    built = cxy("build", cwd=tmp_path)
+    assert built.returncode == 0 and "has changed" not in built.stderr
+
+    # Both change the same setting.
+    manifest_path.write_text(
+        text.replace('defines = ["CORE_FAST"]', 'defines = ["CORE_FAST", "MINE"]')
+    )
+    cmakelists.write_text(
+        HEADER_ONLY_CMAKELISTS + "target_compile_definitions(core PUBLIC CORE_FASTER)\n"
+    )
+    conflicted = cxy("import", "--update", cwd=tmp_path)
+    assert conflicted.returncode == 1
+    assert "lib.core.defines" in conflicted.stderr and "--resolve" in conflicted.stderr
+    assert '["CORE_FAST", "MINE"]' in manifest_path.read_text()
+    resolved = cxy("import", "--update", "--resolve", "upstream", cwd=tmp_path)
+    assert resolved.returncode == 0, resolved.stdout + resolved.stderr
+    core = next(c for c in manifests.load(manifest_path).components if c.name == "core")
+    assert core.settings.defines == ("CORE_FASTER",)
+    assert cxy("import", "--update", cwd=tmp_path).stderr.count("Up to date") == 1

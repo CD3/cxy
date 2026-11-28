@@ -341,7 +341,8 @@ extensions. Be careful when checking a project that you do not trust.
 
 In a CMake project that uses Conan, `cxy import` writes a `cxy.toml` that builds the same thing, so
 that you can use cxy while everyone else keeps their own setup. It writes nothing else in the
-project: it runs Conan and CMake on the project in `build/cxy/import`, and reads what CMake reports
+project apart from `cxy-import.json`, a record of what it imported: it runs Conan and CMake on the
+project in `build/cxy/import`, and reads what CMake reports
 about each target with its File API. The File API leaves out interface libraries, so a file that
 `import` has CMake include after `project()` lists them. `cxy import --dry-run` prints the manifest
 instead.
@@ -368,6 +369,31 @@ differently is a problem, and then `cxy.toml` is written only with `--force`:
 
 Warnings are for what to check, such as a C++ standard that only comes from your Conan profile. A
 recipe or `CMakeLists.txt` can run any code, so only import projects that you trust.
+
+### Keeping up with the project
+
+Files added to the directories in `cxy.toml` are built without importing again. Other changes,
+such as new targets, requirements or definitions, need `cxy import --update`, which imports again
+and merges the result into your `cxy.toml`:
+
+```sh
+cxy import --update --dry-run   # list the changes and conflicts
+cxy import --update             # apply them
+```
+
+`cxy build`, `run` and `test` warn when the project's CMake or Conan files have changed since the
+last import.
+
+The merge compares each setting in three versions: what the last import wrote, recorded in
+`cxy-import.json`, your `cxy.toml`, and what importing writes now. A setting that only you changed
+keeps your value, and one that only the project changed takes the project's, including additions
+and removals. Comments and formatting are kept. A setting changed on both sides, differently, is a
+conflict: cxy shows the three values and asks which to use. Without a terminal, such as in CI, it
+lists the conflicts and changes nothing; `--resolve yours` or `--resolve upstream` decides them
+all. The problems that importing finds still need `--force`.
+
+Keep `cxy-import.json` with `cxy.toml`: commit both, or neither. Without it, every difference
+between your `cxy.toml` and the project counts as a conflict, once.
 
 ## Sharing a project with people who do not use cxy
 

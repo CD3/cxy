@@ -1,6 +1,7 @@
 # Design: keeping an imported cxy.toml up to date
 
-Status: proposed, for review.
+Status: implemented, with the answers proposed below to the questions for review. The
+record is meant to be committed with `cxy.toml`, as the README says.
 
 ## Problem
 
