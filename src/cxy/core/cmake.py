@@ -1,16 +1,21 @@
 """Generate CMakeLists.txt."""
 
-from collections.abc import Iterable, Mapping, Sequence
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
-from cxy.core import conan, frameworks
+from cxy.core import conan, conditions, frameworks
 from cxy.core.conan import CMakeInfo
+from cxy.core.conditions import Condition
 from cxy.core.errors import CxyError
-from cxy.core.manifest import Component, Dependency, Kind, Manifest
+from cxy.core.manifest import Component, Conditional, Dependency, Kind, Manifest, Settings
 from cxy.core.project import Sources
 from cxy.core.testing import TestProgram
 
 MINIMUM_VERSION = "3.24"
+
+_Body = Callable[[Condition | None], list[str]]
+"""Lines to write, given the condition to put in generator expressions, if any."""
 
 # The sources are outside the directory of the generated file, so CMake puts their full path
 # in the names of object files. On Windows that can make them too long for the compiler.
@@ -36,6 +41,8 @@ def cmakelists(
     in the project root. ``isolated`` maps unit tests to the only project sources to compile
     for them; those tests get an additional, isolated program.
     """
+    # The sources may have been found for the manifest before its conditions were resolved.
+    sources = sources.described_by(manifest)
     libraries, executables = sources.libraries, sources.programs
     if not libraries and not executables:
         raise CxyError("nothing to build: no library sources, public headers or main file found")
@@ -90,11 +97,20 @@ def cmakelists(
     ]
     build = manifest.build
     if build.defines or build.flags:
-        if build.defines:
-            out += _call("add_compile_definitions", [], map(quote, build.defines))
-        if build.flags:
-            out += _call("add_compile_options", [], map(quote, build.flags))
+        out += _values("add_compile_definitions", [], build.defines)
+        out += _values("add_compile_options", [], build.flags)
         out.append("")
+    for conditional in manifest.when:
+        settings = conditional.build
+        if settings.defines or settings.flags:
+            out += _when(
+                conditional.condition,
+                lambda condition, s=settings: [
+                    *_values("add_compile_definitions", [], s.defines, condition),
+                    *_values("add_compile_options", [], s.flags, condition),
+                ],
+            )
+            out.append("")
     out += _find_packages(manifest.dependencies, graph)
 
     # Static libraries that go into a shared one must be position-independent code.
@@ -111,6 +127,10 @@ def cmakelists(
         out.append(
             f'option(BUILD_SHARED_LIBS "Build shared libraries" {"ON" if shared else "OFF"})'
         )
+    conditional_settings = {
+        found.component.target: manifest.conditional(found.component)
+        for found in (*libraries, *executables)
+    }
     for found in libraries:
         component = found.component
         lib, settings = component.target, component.settings
@@ -136,9 +156,15 @@ def cmakelists(
         else:
             if component.shared:
                 raise CxyError(f"{key}.shared needs library sources to compile, but there are none")
-            if settings.flags:
+            flagged = [
+                f"{conditional.where}.{key}"
+                for conditional, extra in conditional_settings[lib]
+                if extra.flags
+            ]
+            if settings.flags or flagged:
+                where = key if settings.flags else flagged[0]
                 raise CxyError(
-                    f"{key}.flags apply to library sources, but there are none; use build.flags"
+                    f"{where}.flags apply to library sources, but there are none; use build.flags"
                 )
             out += _call("add_library", [lib, "INTERFACE"])
             out += _call("target_include_directories", [lib, "INTERFACE", include_dir])
@@ -146,6 +172,7 @@ def cmakelists(
         out += _call("target_compile_features", [lib, scope, standard])
         out += _definitions(lib, scope, settings.defines)
         out += _options(lib, "PRIVATE", settings.flags)
+        out += _conditional_settings(conditional_settings[lib], lib, scope, "PRIVATE")
         out += _link(lib, scope, links(component))
         out.append("")
 
@@ -165,6 +192,7 @@ def cmakelists(
             # Tests that link the objects see the same definitions.
             out += _definitions(app, "PUBLIC", settings.defines)
             out += _options(app, "PRIVATE", settings.flags)
+            out += _conditional_settings(conditional_settings[exe], app, "PUBLIC", "PRIVATE")
             out += _link(app, "PUBLIC", exe_links)
             exe_links = [app, *exe_links]
             objects.append(app)
@@ -176,6 +204,11 @@ def cmakelists(
         if not found.sources:
             out += _definitions(exe, "PRIVATE", settings.defines)
         out += _options(exe, "PRIVATE", settings.flags)
+        own = conditional_settings[exe]
+        if found.sources:
+            # The definitions come with the objects.
+            own = [(c, Settings(flags=extra.flags)) for c, extra in own]
+        out += _conditional_settings(own, exe, "PRIVATE", "PRIVATE")
         out += _link(exe, "PRIVATE", exe_links)
         out.append("")
     app_links = [*objects, *(list(library_targets.values()) or dependency_targets)]
@@ -186,6 +219,8 @@ def cmakelists(
     ]
     search_dirs = list(map(path, manifest.include_directories))
     # Isolated tests compile the components' sources themselves, so they need their settings.
+    # Only managed builds have them, whose manifest has no conditions left.
+    assert not (isolated and manifest.when)
     built = [found.component.settings for found in (*libraries, *executables)]
     isolated_defines = list(dict.fromkeys(d for settings in built for d in settings.defines))
     isolated_flags = list(dict.fromkeys(f for settings in built for f in settings.flags))
@@ -278,14 +313,73 @@ def _link(target: str, scope: str, libraries: Iterable[str]) -> list[str]:
     return _call("target_link_libraries", [target, scope, *libraries]) if libraries else []
 
 
-def _definitions(target: str, scope: str, defines: Sequence[str]) -> list[str]:
-    return (
-        _call("target_compile_definitions", [target, scope], map(quote, defines)) if defines else []
-    )
+def _definitions(
+    target: str, scope: str, defines: Sequence[str], condition: Condition | None = None
+) -> list[str]:
+    return _values("target_compile_definitions", [target, scope], defines, condition)
 
 
-def _options(target: str, scope: str, flags: Sequence[str]) -> list[str]:
-    return _call("target_compile_options", [target, scope], map(quote, flags)) if flags else []
+def _options(
+    target: str, scope: str, flags: Sequence[str], condition: Condition | None = None
+) -> list[str]:
+    return _values("target_compile_options", [target, scope], flags, condition)
+
+
+def _values(
+    command: str,
+    arguments: Sequence[str],
+    values: Sequence[str],
+    condition: Condition | None = None,
+) -> list[str]:
+    """Call a command with values, as they are or only when a condition holds at build time."""
+    if not values:
+        return []
+    if condition is None:
+        return _call(command, arguments, map(quote, values))
+    test = conditions.generator_expression(condition)
+    return _call(command, arguments, (f'"$<{test}:{_in_expression(v)}>"' for v in values))
+
+
+def _when(condition: Condition, body: _Body) -> list[str]:
+    """Lines that apply only when a condition holds.
+
+    An if() block is easier to read, but CMake can only tell the build type at build time,
+    so conditions on it go in generator expressions.
+    """
+    if conditions.needs_generator_expression(condition):
+        return body(condition)
+    lines = body(None)
+    if not lines:
+        return []
+    return [f"if({conditions.cmake_if(condition)})", *(f"  {line}" for line in lines), "endif()"]
+
+
+def _conditional_settings(
+    conditional: Sequence[tuple[Conditional, Settings]],
+    target: str,
+    definitions: str,
+    options: str,
+) -> list[str]:
+    """A target's settings from [when] tables, with the scopes of its definitions and options."""
+    out: list[str] = []
+    for when, settings in conditional:
+        out += _when(
+            when.condition,
+            lambda condition, s=settings: [
+                *_definitions(target, definitions, s.defines, condition),
+                *_options(target, options, s.flags, condition),
+            ],
+        )
+    return out
+
+
+_SPECIAL_IN_EXPRESSION = {">": "$<ANGLE-R>", ",": "$<COMMA>", ";": "$<SEMICOLON>"}
+
+
+def _in_expression(value: str) -> str:
+    """Quote a value for a generator expression inside a quoted argument."""
+    text = quote(value)[1:-1]
+    return re.sub("[>,;]", lambda match: _SPECIAL_IN_EXPRESSION[match.group()], text)
 
 
 def _find_packages(dependencies: Iterable[Dependency], graph: Mapping[str, CMakeInfo]) -> list[str]:

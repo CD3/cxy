@@ -2,7 +2,7 @@
 
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
@@ -75,6 +75,18 @@ class Sources:
     def compiled(self) -> tuple[str, ...]:
         """The sources of every component, apart from main files."""
         return tuple(source for c in self.components for source in c.sources)
+
+    def described_by(self, manifest: Manifest) -> "Sources":
+        """The same files, with the components as a manifest describes them, such as one
+        whose [when] conditions are resolved."""
+        current = {component.where: component for component in manifest.components}
+        return replace(
+            self,
+            components=tuple(
+                replace(found, component=current.get(found.component.where, found.component))
+                for found in self.components
+            ),
+        )
 
 
 @dataclass(frozen=True)

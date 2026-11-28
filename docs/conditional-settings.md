@@ -1,8 +1,15 @@
 # Design: conditional settings
 
-Status: proposed, for review. Phase 1 is being implemented with the table named `when`, and
-without the `msvc-like` condition or version comparisons, which can be added later without
-changing the syntax.
+Status: phase 1 is implemented, with the table named `when`. Phases 2 to 4 are proposed, for
+review. Phase 1 differs from the proposal in these ways:
+
+- Conditions can test only `os`, `compiler` and `build_type`, the settings that the exported
+  CMake can test too. `arch` and the others need more thought, and the `msvc-like` condition and
+  version comparisons can be added later without changing the syntax.
+- Flags are added as they are, without dropping repeats, since some must be repeated, as in
+  `-Xclang A -Xclang B`. Repeated definitions are dropped.
+- Managed builds write a `CMakeLists.txt` for each build type, since a condition on the build
+  type makes them differ. With one file, Debug and Release builds reconfigured each other.
 
 ## Problem
 

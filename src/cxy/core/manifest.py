@@ -1,13 +1,16 @@
 """The cxy.toml model."""
 
+import json
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from cxy.core import conditions
+from cxy.core.conditions import Condition
 from cxy.core.errors import CxyError
 
 FILENAME = "cxy.toml"
@@ -19,6 +22,7 @@ _PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
 _TOOL_VERSION = re.compile(r"[0-9][0-9A-Za-z.]*")
 _CONAN_NAME = re.compile(r"[a-z0-9_][a-z0-9_+.-]+")
 _DEFINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL)
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
 OptionValue = str | bool | int
 SOURCE_SUFFIXES = {".cpp", ".cc", ".cxx", ".c++"}
@@ -62,6 +66,29 @@ class Settings:
 @dataclass(frozen=True)
 class LibrarySettings(Settings):
     shared: bool = False
+
+
+@dataclass(frozen=True)
+class Conditional:
+    """Settings that apply only when a condition holds, from a [when.'<condition>'] table."""
+
+    text: str
+    """The condition as written."""
+    condition: Condition
+    build: Settings = Settings()
+    library: Settings = Settings()
+    """For the library that [layout] describes."""
+    program: Settings = Settings()
+    """For the program that [layout] describes."""
+    libraries: Mapping[str, Settings] = field(default_factory=dict)
+    """For [lib.NAME] libraries, by name."""
+    programs: Mapping[str, Settings] = field(default_factory=dict)
+    """For [bin.NAME] programs, by name."""
+
+    @property
+    def where(self) -> str:
+        """Where it is in cxy.toml."""
+        return f"when.{toml_key(self.text)}"
 
 
 class Kind(StrEnum):
@@ -144,6 +171,51 @@ class Manifest:
     """Those in [lib.NAME] tables, which replace the one that [layout] describes."""
     programs: tuple[Component, ...] = ()
     """Those in [bin.NAME] tables, which replace the one that [layout] describes."""
+    when: tuple[Conditional, ...] = ()
+    """Settings that depend on the platform, compiler or build type."""
+
+    def resolve(self, settings: Mapping[str, str]) -> "Manifest":
+        """Return the manifest for a configuration, given its Conan host settings, with the
+        settings of each [when] table that applies added to the others."""
+        manifest = replace(self, when=())
+        for conditional in self.when:
+            if not conditions.evaluate(conditional.condition, settings):
+                continue
+            manifest = replace(
+                manifest,
+                build=_added(manifest.build, conditional.build),
+                library=_added(manifest.library, conditional.library),
+                program=_added(manifest.program, conditional.program),
+                libraries=tuple(
+                    replace(c, settings=_added(c.settings, conditional.libraries.get(c.name)))
+                    for c in manifest.libraries
+                ),
+                programs=tuple(
+                    replace(c, settings=_added(c.settings, conditional.programs.get(c.name)))
+                    for c in manifest.programs
+                ),
+            )
+        return manifest
+
+    def conditional(self, component: Component) -> list[tuple[Conditional, Settings]]:
+        """The [when] tables with settings for a component, and those settings."""
+        named = self.libraries if component.kind is Kind.LIBRARY else self.programs
+        result = []
+        for conditional in self.when:
+            if named:
+                by_name = (
+                    conditional.libraries
+                    if component.kind is Kind.LIBRARY
+                    else conditional.programs
+                )
+                settings = by_name.get(component.name, Settings())
+            elif component.kind is Kind.LIBRARY:
+                settings = conditional.library
+            else:
+                settings = conditional.program
+            if settings.defines or settings.flags:
+                result.append((conditional, settings))
+        return result
 
     @property
     def components(self) -> tuple[Component, ...]:
@@ -205,6 +277,7 @@ def parse(text: str) -> Manifest:
             "build",
             "lib",
             "bin",
+            "when",
         },
         "top level",
     )
@@ -251,6 +324,7 @@ def parse(text: str) -> Manifest:
         program=program,
         libraries=libraries,
         programs=programs,
+        when=_conditionals(_table(data, "when"), libraries, programs),
     )
     _check_components(manifest.components)
     return manifest
@@ -259,6 +333,13 @@ def parse(text: str) -> Manifest:
 def is_definition(text: str) -> bool:
     """Whether a preprocessor definition is NAME or NAME=value."""
     return _DEFINE.fullmatch(text) is not None
+
+
+def toml_key(key: str) -> str:
+    """Write a key as it would appear in a dotted TOML key."""
+    if _BARE_KEY.fullmatch(key):
+        return key
+    return f"'{key}'" if "'" not in key and key.isprintable() else json.dumps(key)
 
 
 def check_name(name: str) -> None:
@@ -316,6 +397,79 @@ def _settings(table: Mapping[str, Any], where: str, known: bool = False) -> Sett
         if flag.startswith(("-D", "/D")):
             raise CxyError(f"{where}.flags: put {flag!r} in {where}.defines, without -D")
     return Settings(defines, flags)
+
+
+def _added(settings: Any, extra: Settings | None) -> Any:
+    """Add a [when] table's settings to others. Definitions are not repeated; flags are
+    passed as they are, since a repeated flag may matter."""
+    if extra is None:
+        return settings
+    return replace(
+        settings,
+        defines=tuple(dict.fromkeys((*settings.defines, *extra.defines))),
+        flags=(*settings.flags, *extra.flags),
+    )
+
+
+def _conditionals(
+    table: Mapping[str, Any], libraries: Sequence[Component], programs: Sequence[Component]
+) -> tuple[Conditional, ...]:
+    result = []
+    for text, value in table.items():
+        where = f"when.{toml_key(text)}"
+        try:
+            condition = conditions.parse(text)
+        except CxyError as error:
+            raise CxyError(f"[{where}]: {error}") from error
+        if not isinstance(value, dict):
+            raise CxyError(f"{where} must be a table")
+        _known(value, {"build", "lib", "bin"}, f"[{where}]")
+        library, named_libraries = _conditional_components(
+            _table(value, "lib", where), f"{where}.lib", libraries, "lib"
+        )
+        program, named_programs = _conditional_components(
+            _table(value, "bin", where), f"{where}.bin", programs, "bin"
+        )
+        result.append(
+            Conditional(
+                text,
+                condition,
+                build=_settings(_table(value, "build", where), f"{where}.build", known=True),
+                library=library,
+                program=program,
+                libraries=named_libraries,
+                programs=named_programs,
+            )
+        )
+    return tuple(result)
+
+
+def _conditional_components(
+    table: Mapping[str, Any], where: str, components: Sequence[Component], section: str
+) -> tuple[Settings, dict[str, Settings]]:
+    """Read the [when.X.lib] or [when.X.bin] table of a [when] table."""
+    named = {key: value for key, value in table.items() if isinstance(value, dict)}
+    if not named:
+        _known(table, {"defines", "flags"}, f"[{where}]")
+        if table and components:
+            raise CxyError(
+                f"[{where}] is for the {section} that [layout] describes, but there are "
+                f"[{section}.NAME] tables; use [{where}.NAME]"
+            )
+        return _settings(table, where), {}
+    if len(named) != len(table):
+        raise CxyError(
+            f"[{where}] holds either settings or named components such as "
+            f"[{where}.{next(iter(named))}], not both"
+        )
+    names = {component.name for component in components}
+    result = {}
+    for name, value in named.items():
+        if name not in names:
+            raise CxyError(f"[{where}.{name}]: there is no [{section}.{name}]")
+        _known(value, {"defines", "flags"}, f"[{where}.{name}]")
+        result[name] = _settings(value, f"{where}.{name}")
+    return Settings(), result
 
 
 def _named(table: Mapping[str, Any], where: str) -> dict[str, dict[str, Any]] | None:

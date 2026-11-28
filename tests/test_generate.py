@@ -264,3 +264,79 @@ def test_missing_component_files():
     sources = Sources((ComponentSources(library, ("lib/a.cpp",)), ComponentSources(tool)))
     with pytest.raises(CxyError, match=r"bin\.tool: no tool\.cpp"):
         cmake.cmakelists(manifest, sources, {})
+
+
+CONDITIONAL = """
+[package]
+name = "app"
+version = "1.0"
+[build]
+defines = ["COMMON"]
+[when.windows.build]
+defines = ["NOMINMAX"]
+[when.'any(gcc, clang, apple-clang)'.build]
+flags = ["-Wall"]
+[when.'build_type = "Debug"'.build]
+defines = ["TRACE", "LIST=a,b;c", 'NAME="x>y"']
+[when.msvc.lib]
+defines = ["LIB_MSVC"]
+flags = ["/W4"]
+[when.windows.bin]
+defines = ["WINDOWS_APP"]
+[when.'all(unix, build_type = "Release")'.bin]
+defines = ["FAST"]
+flags = ["-O3"]
+"""
+
+
+def test_exported_conditions():
+    manifest = parse(CONDITIONAL)
+    sources = Sources.default(manifest, lib=("lib/a.cpp",), app=("src/b.cpp",), main="src/main.cpp")
+    text = cmake.cmakelists(manifest, sources, {})
+    assert (
+        'add_compile_definitions(\n  "COMMON"\n)\n\n'
+        'if(WIN32)\n  add_compile_definitions(\n    "NOMINMAX"\n  )\nendif()\n\n'
+        'if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")\n'
+        '  add_compile_options(\n    "-Wall"\n  )\nendif()\n\n'
+        "add_compile_definitions(\n"
+        '  "$<$<CONFIG:Debug>:TRACE>"\n'
+        '  "$<$<CONFIG:Debug>:LIST=a$<COMMA>b$<SEMICOLON>c>"\n'
+        '  "$<$<CONFIG:Debug>:NAME=\\"x$<ANGLE-R>y\\">"\n'
+        ")\n"
+    ) in text
+    assert (
+        'if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")\n'
+        '  target_compile_definitions(app_lib PUBLIC\n    "LIB_MSVC"\n  )\n'
+        '  target_compile_options(app_lib PRIVATE\n    "/W4"\n  )\n'
+        "endif()\n"
+    ) in text
+    release = "$<AND:$<NOT:$<PLATFORM_ID:Windows>>,$<CONFIG:Release>>"
+    # The program's definitions come with its objects, and its flags apply to both.
+    assert (
+        f'target_compile_definitions(app_app PUBLIC\n  "$<{release}:FAST>"\n)\n'
+        f'target_compile_options(app_app PRIVATE\n  "$<{release}:-O3>"\n)\n'
+    ) in text
+    assert f'target_compile_options(app PRIVATE\n  "$<{release}:-O3>"\n)\n' in text
+    assert "target_compile_definitions(app PRIVATE" not in text
+    assert (
+        'if(WIN32)\n  target_compile_definitions(app_app PUBLIC\n    "WINDOWS_APP"\n  )\nendif()\n'
+    ) in text
+    # The program itself gets no empty block for the definitions that its objects have.
+    assert text.count("if(WIN32)") == 2
+
+
+def test_managed_builds_resolve_conditions():
+    manifest = parse(CONDITIONAL).resolve(
+        {"os": "Windows", "compiler": "msvc", "build_type": "Debug"}
+    )
+    sources = Sources.default(manifest, lib=("lib/a.cpp",), main="src/main.cpp")
+    text = cmake.cmakelists(manifest, sources, {}, root="..")
+    assert "if(WIN32)" not in text and "COMPILER_ID" not in text and "$<" not in text
+    assert '"COMMON"\n  "NOMINMAX"\n  "TRACE"\n' in text
+    assert 'target_compile_options(app_lib PRIVATE\n  "/W4"\n)' in text
+
+
+def test_conditional_flags_need_library_sources():
+    manifest = parse('[package]\nname = "app"\nversion = "1.0"\n[when.msvc.lib]\nflags = ["/W4"]\n')
+    with pytest.raises(CxyError, match=r"when\.msvc\.lib\.flags apply to library sources"):
+        cmake.cmakelists(manifest, Sources.default(manifest, has_headers=True), {})

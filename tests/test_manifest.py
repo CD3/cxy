@@ -125,3 +125,90 @@ defines = ["Z=1"]
 def test_invalid_names(name):
     with pytest.raises(CxyError, match="invalid package name"):
         parse(f'[package]\nname = "{name}"\nversion = "1"\n')
+
+
+WHEN = """
+[build]
+defines = ["COMMON"]
+flags = ["-g"]
+[lib.core]
+sources = "core"
+defines = ["CORE"]
+[bin.app]
+main = "app.cpp"
+[when.windows.build]
+defines = ["NOMINMAX", "COMMON"]
+[when.msvc.build]
+flags = ["/W4"]
+[when.'any(gcc, clang)'.build]
+flags = ["-Wall", "-g"]
+[when.'all(windows, msvc)'.lib.core]
+defines = ["CORE_WINAPI"]
+[when.linux.bin.app]
+flags = ["-pthread"]
+"""
+
+
+def test_conditional_settings():
+    manifest = parse(PACKAGE + WHEN)
+    assert [c.where for c in manifest.when] == [
+        "when.windows",
+        "when.msvc",
+        "when.'any(gcc, clang)'",
+        "when.'all(windows, msvc)'",
+        "when.linux",
+    ]
+    windows = manifest.resolve({"os": "Windows", "compiler": "msvc", "build_type": "Debug"})
+    assert windows.when == ()
+    assert windows.build.defines == ("COMMON", "NOMINMAX")
+    assert windows.build.flags == ("-g", "/W4")
+    assert windows.libraries[0].settings.defines == ("CORE", "CORE_WINAPI")
+    assert windows.programs[0].settings.flags == ()
+    linux = manifest.resolve({"os": "Linux", "compiler": "gcc", "build_type": "Debug"})
+    # Repeated flags are kept, since some must be.
+    assert linux.build.flags == ("-g", "-Wall", "-g")
+    assert linux.libraries[0].settings.defines == ("CORE",)
+    assert linux.programs[0].settings.flags == ("-pthread",)
+
+    [core, app] = manifest.components
+    assert [(c.where, s.defines) for c, s in manifest.conditional(core)] == [
+        ("when.'all(windows, msvc)'", ("CORE_WINAPI",))
+    ]
+    assert [c.where for c, _ in manifest.conditional(app)] == ["when.linux"]
+
+
+def test_conditional_settings_of_the_layout():
+    text = PACKAGE + '[when.windows.lib]\ndefines = ["A"]\n[when.windows.bin]\nflags = ["/W4"]\n'
+    manifest = parse(text)
+    resolved = manifest.resolve({"os": "Windows"})
+    [library, program] = resolved.components
+    assert library.settings.defines == ("A",) and program.settings.flags == ("/W4",)
+    [library, program] = manifest.components
+    assert [s.defines for _, s in manifest.conditional(library)] == [("A",)]
+    assert [s.flags for _, s in manifest.conditional(program)] == [("/W4",)]
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("[when]\nwindows = 1\n", "when.windows must be a table"),
+        ("[when.windows]\nflags = []\n", "unknown key 'flags' in \\[when.windows\\]"),
+        ("[when.windos.build]\n", "did you mean 'windows'"),
+        ("[when.windows.build]\nshared = true\n", "unknown key 'shared'"),
+        ("[when.windows.lib]\nshared = true\n", "unknown key 'shared'"),
+        ('[when.windows.build]\ndefines = ["-DX"]\n', "not NAME or NAME=value"),
+        ('[when.windows.lib.core]\ndefines = ["X"]\n', "there is no \\[lib.core\\]"),
+        (
+            '[lib.core]\nsources = "core"\n[when.windows.lib]\ndefines = ["X"]\n',
+            "use \\[when.windows.lib.NAME\\]",
+        ),
+        (
+            '[lib.core]\nsources = "core"\n[when.windows.lib.core]\nuses = ["core"]\n',
+            "unknown key 'uses' in \\[when.windows.lib.core\\]",
+        ),
+        ("[when.'all(windows, linux)'.build]\n", "when.'all\\(windows, linux\\)'.*never be true"),
+    ],
+)
+def test_conditional_errors(extra, message):
+    with pytest.raises(CxyError, match=message):
+        parse(PACKAGE + extra)

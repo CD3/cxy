@@ -128,6 +128,40 @@ test-patterns = ["*_test.cpp", "*.test.cpp"]
 - On Windows, a shared library exports all its functions, so that it needs no export macros, but
   not its global variables.
 
+### Settings for some platforms
+
+`[when.'<condition>']` tables add settings that apply only on some platforms, with some
+compilers, or in some build types:
+
+```toml
+[when.windows.build]
+defines = ["WIN32_LEAN_AND_MEAN", "NOMINMAX"]
+
+[when.msvc.build]
+flags = ["/W4", "/permissive-"]
+
+[when.'any(gcc, clang, apple-clang)'.build]
+flags = ["-Wall", "-Wextra"]
+
+[when.'build_type = "Debug"'.lib]
+defines = ["TRACE"]
+
+[when.'all(windows, msvc)'.lib.core]   # for [lib.core]
+defines = ["CORE_USE_WINAPI"]
+```
+
+- A condition is `windows`, `linux`, `macos` or `unix` (any system but Windows); `msvc`, `gcc`,
+  `clang` or `apple-clang`; or `os`, `compiler` or `build_type` with a value as Conan names it,
+  such as `os = "FreeBSD"`. `all(...)`, `any(...)` and `not(...)` combine them. `clang` is not
+  Apple's Clang, as for Conan and CMake.
+- Each table may have `build`, `lib` and `bin` tables, or `lib.NAME` and `bin.NAME` for named
+  libraries and programs, with `defines` and `flags`. These are added to the others.
+- cxy tests the conditions against the settings of the Conan profile it builds with. `cxy export`
+  writes them as CMake conditions, such as `if(WIN32)` or `$<CONFIG:Debug>`, so the exported
+  project chooses the same way.
+- Compiler conditions suit flags, which differ between compilers; system conditions suit
+  definitions.
+
 ### Several libraries and programs
 
 Named `[lib.NAME]` and `[bin.NAME]` tables replace the library and program that `[layout]`

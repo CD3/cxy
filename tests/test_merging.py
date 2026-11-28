@@ -128,3 +128,14 @@ def test_no_answer_about_a_conflict(monkeypatch):
     monkeypatch.setattr("builtins.input", closed)
     with pytest.raises(CxyError, match="--resolve"):
         importing._ask(Conflict(("package", "version"), "1.0", "1.1", "2.0"))
+
+
+def test_conditions_you_wrote_are_kept():
+    yours = BASE + "\n[when.'any(gcc, clang)'.lib.core]\nflags = [\"-Wall\"]  # mine\n"
+    upstream = BASE.replace('defines = ["X"]', 'defines = ["X", "Y"]')
+    plan = merging.plan(BASE, yours, upstream)
+    assert plan.conflicts == []
+    assert [merging.describe(c) for c in plan.changes] == ['lib.core.defines: ["X"] -> ["X", "Y"]']
+    merged = merging.apply(yours, upstream, plan.changes)
+    assert merged.endswith("[when.'any(gcc, clang)'.lib.core]\nflags = [\"-Wall\"]  # mine\n")
+    assert 'defines = ["X", "Y"]' in merged

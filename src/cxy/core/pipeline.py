@@ -475,9 +475,12 @@ def configure(
     sources = project.sources()
     directory = _prepare(project, options, sources)
     graph = _install(project, options, directory)
-    root = Path(os.path.relpath(project.root, project.build_dir)).as_posix()
+    manifest = project.manifest
+    if manifest.when:
+        manifest = manifest.resolve(host_settings(project, options, directory))
+    root = Path(os.path.relpath(project.root, _generated(project, options))).as_posix()
     text = cmake.cmakelists(
-        _with_defines(project.manifest, options),
+        _with_defines(manifest, options),
         sources,
         graph,
         programs=testing.plan(project, sources),
@@ -486,6 +489,44 @@ def configure(
     )
     _configure(project, options, directory, text)
     return directory
+
+
+def host_settings(project: Project, options: BuildOptions, directory: Path) -> dict[str, str]:
+    """Return the Conan host settings of a build, which [when] conditions test."""
+    path = directory / "host.json"
+    stamp = Stamp(
+        directory / "host.stamp",
+        options.profile,
+        _conan_config(options.profile),
+        options.build_type,
+        project.manifest.std,
+        tools.identity("conan"),
+    )
+    if not options.refresh and stamp.is_current(path):
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = None
+        if isinstance(settings, dict):
+            return settings
+    stamp.clear()
+    ensure_profile(project, options)
+    output = tools.run(
+        "conan",
+        *("profile", "show", *_conan_arguments(project, options), "--format=json"),
+        cwd=project.root,
+        capture=True,
+    )
+    try:
+        settings = json.loads(output)["host"]["settings"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise CxyError("could not understand the profile that Conan showed") from error
+    if not isinstance(settings, dict):
+        raise CxyError("could not understand the profile that Conan showed")
+    settings = {str(key): str(value) for key, value in settings.items()}
+    write_if_changed(path, json.dumps(settings, indent=4))
+    stamp.save()
+    return settings
 
 
 def _with_defines(manifest: Manifest, options: BuildOptions) -> Manifest:
@@ -560,8 +601,14 @@ def _install(project: Project, options: BuildOptions, directory: Path) -> dict[s
     return graph
 
 
+def _generated(project: Project, options: BuildOptions) -> Path:
+    """Where the CMakeLists.txt of a managed build goes. Each build type has its own, since
+    they can differ, as with conditions on the build type."""
+    return project.build_dir / "source" / options.build_type.lower()
+
+
 def _configure(project: Project, options: BuildOptions, directory: Path, text: str) -> None:
-    generated = project.build_dir
+    generated = _generated(project, options)
     write_if_changed(generated / "CMakeLists.txt", text)
 
     toolchain = directory / "conan" / "conan_toolchain.cmake"

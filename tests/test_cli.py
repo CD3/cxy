@@ -225,6 +225,85 @@ def test_several_libraries_and_programs(tmp_path):
         assert done.returncode == 0, done.stdout + done.stderr
 
 
+CONDITIONS = """
+[when.windows.build]
+defines = ["OS_NAME=\\"windows\\""]
+[when.linux.build]
+defines = ["OS_NAME=\\"linux\\""]
+[when.macos.build]
+defines = ["OS_NAME=\\"macos\\""]
+[when.msvc.build]
+defines = ["IS_MSVC"]
+flags = ["/W4"]
+[when.gcc.build]
+defines = ["IS_GCC"]
+[when.'any(clang, apple-clang)'.build]
+defines = ["IS_CLANG"]
+[when.'any(gcc, clang, apple-clang)'.lib]
+flags = ["-Wall"]
+[when.'build_type = "Release"'.bin]
+defines = ["IS_RELEASE"]
+"""
+COMPILER_CHECKS = """
+#if defined(_MSC_VER) && !defined(__clang__)
+#ifndef IS_MSVC
+#error not IS_MSVC
+#endif
+#elif defined(__clang__)
+#ifndef IS_CLANG
+#error not IS_CLANG
+#endif
+#elif defined(__GNUC__)
+#ifndef IS_GCC
+#error not IS_GCC
+#endif
+#endif
+"""
+
+
+@pytest.mark.e2e
+def test_conditional_settings(tmp_path):
+    cxy("new", "demo", cwd=tmp_path)
+    project = tmp_path / "demo"
+    with (project / "cxy.toml").open("a", encoding="utf-8") as file:
+        file.write(CONDITIONS)
+    (project / "src" / "main.cpp").write_text(
+        f"#include <iostream>\n{COMPILER_CHECKS}"
+        "int main() {\n"
+        "    std::cout << OS_NAME;\n"
+        '#ifdef IS_RELEASE\n    std::cout << " release";\n#endif\n'
+        "    std::cout << '\\n';\n}\n"
+    )
+    system = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
+
+    run = cxy("run", cwd=project)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == system
+    release = cxy("run", "--release", cwd=project)
+    assert release.returncode == 0, release.stdout + release.stderr
+    assert release.stdout.splitlines()[-1] == f"{system} release"
+
+    # The exported project chooses the same, with CMake's conditions.
+    assert cxy("export", cwd=project).returncode == 0
+    (project / "cxy.toml").rename(tmp_path / "cxy.toml")
+    generator = "tools.cmake.cmaketoolchain:generator=Ninja"
+    settings = ("--build=missing", "-s", "compiler.cppstd=20", "-c", generator)
+    for command in (
+        ("conan", "install", ".", *settings),
+        ("cmake", "--preset", "conan-release"),
+        ("cmake", "--build", "--preset", "conan-release"),
+    ):
+        done = subprocess.run(command, cwd=project, capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+    program = next(
+        path
+        for path in (project / "build" / "Release").rglob("demo*")
+        if path.is_file() and path.name in ("demo", "demo.exe")
+    )
+    output = subprocess.run([program], capture_output=True, text=True, check=True).stdout
+    assert output.strip() == f"{system} release"
+
+
 @pytest.mark.e2e
 def test_export_builds_without_cxy(tmp_path):
     cxy("new", "demo", cwd=tmp_path)
