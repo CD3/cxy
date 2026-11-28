@@ -84,3 +84,30 @@ cxy in the project: which commands to run for building, testing, formatting and 
 - Generate it from the installed cxy's commands and help text, so it matches the version, and
   include project details such as the components and the test framework.
 - Never overwrite a file the project already has. Report it, as for configuration files.
+
+## Installing compilers
+
+Trying the newest C++ features often needs a GCC or Clang newer than the system's package
+manager has. cxy should install one, and build with it, without anyone building a compiler by
+hand. It should use an existing compiler manager rather than build compilers itself.
+
+- Candidates to evaluate:
+  - conda-forge's prebuilt GCC and Clang, through pixi or micromamba: per-user, with no root
+    needed, on Linux, macOS and Windows;
+  - Homebrew's `gcc` and `llvm`, on macOS and Linux;
+  - apt.llvm.org and the Ubuntu toolchain PPA, for Debian and Ubuntu, though they need root;
+  - Spack, which builds compilers from source, including versions that no one packages yet;
+  - xPack's GCC and Clang binaries;
+  - Conan's own tool requirements, if ConanCenter has usable compiler recipes. This needs
+    checking.
+- Check for each one: how new its versions are, the platforms it covers, whether it needs root,
+  how long an install takes, and whether its standard library and linker work with Conan
+  packages built by the system compiler.
+- cxy would then write a Conan profile for the installed compiler: `compiler`,
+  `compiler.version`, `compiler.libcxx`, and the executables in
+  `tools.build:compiler_executables`. You would choose it with `--profile`, or a setting in
+  `cxy.toml`.
+- Possible commands: `cxy toolchain add gcc@15`, `cxy toolchain list`, and
+  `cxy toolchain remove`.
+- Packages from ConanCenter must be built from source for a compiler version that has no
+  prebuilt binaries. `--build=missing` already does that, but the first build is slow.
